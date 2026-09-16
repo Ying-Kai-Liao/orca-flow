@@ -1,0 +1,48 @@
+{
+  "project": "example-app",
+  "language": "English",
+  "base_branch": "origin/main",
+  "worker": {
+    "model": "opus",
+    "checks": ["npx tsc --noEmit", "npm run lint"],
+    "test_command": "npx vitest run {files} --maxWorkers=1",
+    "test_slots": 1,
+    "full_check_command": "bash scripts/check.sh",
+    "migrations_dir": "sql",
+    "run_command": "npm run dev",
+    "extra_rules": [
+      "Migrations must run on both the in-process database used by tests and the real one used in production.",
+      "The employee-facing bundle is one big file several packages touch; stay inside your own section of it."
+    ]
+  },
+  "merge_queue": {
+    "worktree_name": "merge-queue",
+    "state_file": "NOW.md",
+    "targets": [
+      {
+        "name": "staging",
+        "deploy": [
+          "gh workflow run deploy.yml -f action=deploy -f target=staging",
+          "gh run list --workflow deploy.yml --limit 5 --json databaseId,status,headSha,createdAt",
+          "gh run watch <databaseId> --exit-status"
+        ],
+        "health_url": "https://staging.example.com/health",
+        "verify": []
+      },
+      {
+        "name": "production",
+        "backup": [
+          "ssh -i ~/.ssh/deploy-key ec2-user@prod.example.com 'sudo -n -u postgres pg_dump -Fc app > /home/ec2-user/db-backups/pre-<batch>-<timestamp>.dump'",
+          "ssh -i ~/.ssh/deploy-key ec2-user@prod.example.com 'pg_restore -l /home/ec2-user/db-backups/<file> | grep -c \"TABLE DATA\"'"
+        ],
+        "deploy": ["DEPLOY_YES=1 DEPLOY_SSH_KEY=~/.ssh/deploy-key bash scripts/deploy.sh production"],
+        "health_url": "https://app.example.com/health",
+        "verify": ["the backup table count should be close to the number of tables; 0 means the backup is broken, stop"]
+      }
+    ]
+  },
+  "main_checkout": {
+    "guard": true,
+    "allow_prefixes": [".claude/"]
+  }
+}

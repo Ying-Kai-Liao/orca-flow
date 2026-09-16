@@ -1,0 +1,7 @@
+{
+  "language": "English",
+  "worker": {
+    "checks": ["npm run lint"],
+    "test_command": "npm test -- {files}"
+  }
+}

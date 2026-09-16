@@ -1,0 +1,22 @@
+{
+  "project": "example-service",
+  "language": "English",
+  "base_branch": "origin/main",
+  "worker": {
+    "checks": ["ruff check .", "mypy src"],
+    "test_command": "pytest {files} -q",
+    "test_slots": 2,
+    "full_check_command": "pytest -q",
+    "migrations_dir": "alembic/versions"
+  },
+  "merge_queue": {
+    "worktree_name": "merge-queue",
+    "targets": [
+      {
+        "name": "production",
+        "deploy": ["fly deploy --remote-only"],
+        "health_url": "https://example.fly.dev/healthz"
+      }
+    ]
+  }
+}

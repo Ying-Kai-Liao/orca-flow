@@ -1,0 +1,74 @@
+{
+ "skill_name": "orca-flow",
+ "harness_note": "Every run is a DRY RUN, with or without the skill. Read-only commands are allowed. Anything that changes state goes into outputs/plan.md instead of being run. PR numbers are hypothetical. The live repo state changes between runs, so graders check claims against the repo at grading time. Label each plan.md step 'runs now' or 'needs user OK' so approval gating can be graded. The prompts assume a repo with an orca-flow config (see examples/); replace the feature names with two real, non-overlapping tasks from your own project before running.",
+ "evals": [
+  {
+   "id": 1,
+   "name": "spawn-two-workers",
+   "prompt": "I have two tickets to do in parallel: (1) the employee's booking list needs a month filter; (2) operations admins need to export one company's monthly usage as CSV, which needs a new backend endpoint. Give both to workers, I'm heading into a meeting.",
+   "expected_output": "Checks that neither feature exists yet. Writes one brief per task (acceptance criteria, scope, what not to touch, and that the CSV task is an export, not the CSV import that already exists). Starts each worker with spawn_worker.py. Doesn't touch the main checkout. Tells the user how to watch each worker.",
+   "files": [],
+   "expectations": [
+    "Before starting workers, checks the base branch, open PRs or the code for an existing implementation of each task, with evidence in the plan",
+    "Writes a separate brief file per task, each with acceptance criteria and an explicit out-of-scope or do-not-touch list",
+    "The CSV brief names both the backend endpoint and the admin UI, and distinguishes the new export from any similar existing feature it must not reuse or break",
+    "Looks for conflicts with work in progress (other open PRs or worktrees touching the same files, or taking the same migration number) and records what it found in the briefs or plan",
+    "Starts each worker in its own new Orca worktree, waits until the TUI is ready, and sends the prompt exactly once (spawn_worker.py does all of this)",
+    "The instructions each worker receives say: targeted tests only through the test lock, open a PR, do not merge or deploy",
+    "Plans no edits to files in the repo's main checkout",
+    "The final reply gives each worker's name and how to watch it (worktree path, terminal handle, or the worktrees.py status/inventory command)"
+   ]
+  },
+  {
+   "id": 2,
+   "name": "manager-hands-to-queue",
+   "prompt": "PR #80 looks good to me, merge and deploy to both targets thanks",
+   "expected_output": "Doesn't merge or deploy. Finds the merge/deploy session that's already running by what it's doing (ListAgents, worktree ps comments or prompts, terminal titles), not by a worktree name. Hands #80 to that session with a one-line message that includes the reviewed head SHA, migration status, open decisions and whom to report back to. Starts a queue only if none exists.",
+   "files": [],
+   "expectations": [
+    "The manager plans no merge of PR #80 (no gh pr merge, no git merge into the base branch, no push to the base branch)",
+    "The manager plans no deploy (none of the deploy commands from the project's config)",
+    "Looks for an already-running merge/deploy session by activity (ListAgents, orca worktree ps comments or agent prompts, or terminal titles), not only a worktree named merge-queue",
+    "If a merge/deploy session is running at run time, hands #80 to it and plans no second queue; creating a queue appears only as a fallback for when none is found",
+    "The handoff message includes PR #80's reviewed head commit SHA (or the exact gh command that fills it in) so the queue merges only what was reviewed",
+    "The handoff states the migration status and whom to report back to"
+   ]
+  },
+  {
+   "id": 3,
+   "name": "queue-merges-and-deploys",
+   "prompt": "You're the merge queue. Two PRs came in: #81 (frontend only) and #82, which adds a new numbered migration. Merge them and deploy everywhere.",
+   "expected_output": "Checks for another merge/deploy session mid-batch and coordinates instead of deploying at the same time. Works in a clean queue worktree. Merges the reviewed heads one at a time. Compares migration duplicates against the pre-existing baseline. Runs the full check once while holding the test lock. Pushes to the base branch. Deploys each configured target in order, with the backup step first where one is configured. Checks each health URL. Updates the status file and reports back.",
+   "files": [],
+   "expectations": [
+    "Checks whether another merge/deploy session is mid-batch and plans to join or wait behind it instead of merging or deploying at the same time",
+    "If it hands off to a running queue, the handoff carries everything that queue needs: each PR's reviewed head SHA (or how to get it), the migration situation, post-deploy checks, and whom to report back to",
+    "Works in a clean dedicated queue worktree, never the main checkout",
+    "Merges each PR at the head SHA the manager reviewed (or verifies headRefOid before merging), one after the other",
+    "After merging, checks for duplicate migration numbers against a baseline taken before the batch, so an already-deployed duplicate isn't mistaken for a new clash",
+    "Notices if the new migration number clashes with one in another open PR or worktree, and plans a fix (renumber, or tell the owner)",
+    "Runs the project's full check once for the batch while holding test-lock.sh for the whole run (a one-time process check does not count)",
+    "Pushes with git push to the base branch, not gh pr merge",
+    "Uses the deploy commands from the project's config rather than invented ones, in the configured order, and confirms any CI run it watches is for the pushed commit",
+    "Runs the configured backup step and verifies the backup is non-empty before deploying the target that has one",
+    "Checks every configured health URL and compares the reported commit with what was deployed",
+    "Updates the configured status file and reports back to the managers with commit, test count and deploy status"
+   ]
+  },
+  {
+   "id": 4,
+   "name": "cleanup-idle-worktrees",
+   "prompt": "While you're idle, can you look over the idle workers and worktrees and tidy up?",
+   "expected_output": "Takes an inventory (PR state, uncommitted changes read from git, busy or waiting agents). Removes nothing that holds work. Still finds what can actually go (finished Setup tabs, never-used shells, clean worktrees with merged PRs) and plans closing or removing them after the user agrees. Tells agents waiting on the user apart from idle ones. Handles any secret exposed in a terminal without copying it and suggests rotating it.",
+   "files": [],
+   "expectations": [
+    "Takes an inventory of this repo's worktrees that covers PR state, uncommitted changes and agent activity",
+    "Proposes removing no worktree that has uncommitted changes, an open PR, unpushed commits or a BLOCKED comment",
+    "Finds concrete things that really can be cleaned (for example finished Setup tabs or never-used shells), gives the exact close or remove command for each, and marks every close or remove step as needing the user's OK; none is planned to run unasked",
+    "Tells agent sessions waiting for the user's answer apart from truly idle ones, and doesn't propose closing the waiting ones",
+    "If a terminal shows secret values: names the terminal, copies no value into any output, and recommends closing it and rotating the keys",
+    "Nothing is actually removed or closed; removal commands appear only in the plan or as dry-run output"
+   ]
+  }
+ ]
+}
