@@ -13,8 +13,12 @@ Start one with `python3 scripts/config.py init`, check what resolved with
 `python3 scripts/config.py show`, and read a single value with
 `python3 scripts/config.py get worker.test_command`.
 
-The repo is found from the skill's own location, falling back to the current directory when the
-skill is installed outside a repo (`~/.claude/skills/orca-flow`).
+**Which repo is "the repo":** when the skill lives inside a project (`.claude/skills/orca-flow`),
+its own location decides, so the caller's cwd doesn't matter. When it's installed standalone — a
+clone in `~/.claude/skills/`, which is a git repo of its own — that would resolve to the skill's
+repository, so the caller's current directory decides instead. A cwd inside a linked worktree
+resolves to the main checkout, because worktrees share one git common dir. `$ORCA_FLOW_REPO`
+overrides both.
 
 ## Keys
 

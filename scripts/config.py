@@ -77,17 +77,31 @@ DEFAULTS = {
 }
 
 
-def repo_root():
-    """The main checkout this skill belongs to, found through git's common dir."""
+def _root_from(cwd):
+    """The main checkout containing cwd. --git-common-dir is shared by every linked
+    worktree, so a manager in the main checkout and a worker in a worktree resolve to
+    the same repo."""
     r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                       capture_output=True, text=True, cwd=SKILL_DIR)
-    if r.returncode != 0:
-        # The skill may live outside any repo (~/.claude/skills). Fall back to the caller.
-        r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            return None
-    return os.path.dirname(r.stdout.strip())
+                       capture_output=True, text=True, cwd=cwd)
+    return os.path.dirname(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+
+
+def repo_root():
+    """The project this skill is being used on.
+
+    Installed inside a project (.claude/skills/orca-flow), the skill's own location is the
+    reliable answer, and it stays right whatever the caller's cwd is. Installed standalone
+    (a clone in ~/.claude/skills, which is a git repo of its own), that location would
+    resolve to this repository instead of the user's, so fall back to the caller's cwd.
+    $ORCA_FLOW_REPO overrides both."""
+    env = os.environ.get("ORCA_FLOW_REPO")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    skill_repo = _root_from(SKILL_DIR)
+    standalone = bool(skill_repo) and os.path.realpath(skill_repo) == os.path.realpath(SKILL_DIR)
+    if skill_repo and not standalone:
+        return skill_repo
+    return _root_from(os.getcwd()) or skill_repo
 
 
 def common_dir(root=None):
