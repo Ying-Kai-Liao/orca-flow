@@ -28,7 +28,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfgmod  # noqa: E402
 
 ORCA = os.environ.get("ORCA_CLI_COMMAND", "orca")
-UNITTEST = "python3 -m unittest discover -s tests"
+# (test_command, full_check_command) per detected ecosystem. test_command takes {files}, the
+# test files a worker picked; the full suite belongs to the queue (or a no-queue manager).
+PYTHON = ("python3 -m unittest {files}", "python3 -m unittest discover -s tests")
+NODE = ("npm test -- {files}", "npm test")
 
 
 class OrcaError(Exception):
@@ -68,8 +71,8 @@ def detect_base(root):
 
 
 def detect_test_command(root):
-    """(command or None, why). Only a guess nobody could argue with: one ecosystem, one
-    obvious runner. Two candidates means a human picks."""
+    """((test_command, full_check_command) or None, why). Only a guess nobody could argue
+    with: one ecosystem, one obvious runner. Two candidates means a human picks."""
     found = []
     pkg = os.path.join(root, "package.json")
     if os.path.isfile(pkg):
@@ -79,9 +82,9 @@ def detect_test_command(root):
         except (OSError, ValueError):
             scripts = {}
         if scripts.get("test"):
-            found.append(("npm test", "package.json has a test script"))
+            found.append((NODE, "package.json has a test script"))
     if os.path.isfile(os.path.join(root, "pyproject.toml")) or os.path.isdir(os.path.join(root, "tests")):
-        found.append((UNITTEST, "pyproject.toml or tests/ found"))
+        found.append((PYTHON, "pyproject.toml or tests/ found"))
     if len(found) == 1:
         return found[0]
     if found:
@@ -89,7 +92,7 @@ def detect_test_command(root):
     return None, "no package.json test script, pyproject.toml or tests/ found"
 
 
-def build_config(a, base, test_cmd):
+def build_config(a, base, guess):
     queue = not a.no_queue
     mq = {"enabled": queue}
     if queue:
@@ -101,8 +104,8 @@ def build_config(a, base, test_cmd):
         "base_branch": base,
         "worker": {
             "model": a.model or cfgmod.DEFAULTS["worker"]["model"],
-            "test_command": a.test_command or test_cmd,
-            "full_check_command": a.full_check,
+            "test_command": a.test_command or (guess[0] if guess else None),
+            "full_check_command": a.full_check or (guess[1] if guess else None),
         },
         "merge_queue": mq,
     }
@@ -176,21 +179,24 @@ def main(argv=None):
         if not a.json:
             print(f"{len(steps)}. {name:<8} {status}" + (f"  {detail}" if detail else ""))
 
-    # 1. repo root and base branch
-    root = cfgmod._root_from(os.path.abspath(os.path.expanduser(a.repo))) if a.repo else cfgmod.repo_root()
+    # 1. repo root and base branch. Never config.repo_root(): its fallback is the skill's own
+    # repo, and init must not register or write a config into the skill by mistake.
+    target = a.repo or os.environ.get("ORCA_FLOW_REPO") or os.getcwd()
+    root = cfgmod._root_from(os.path.abspath(os.path.expanduser(target)))
     if not root:
-        step("repo", "failed", f"not a git repository: {a.repo or os.getcwd()}")
+        step("repo", "failed", f"not a git repository: {target}")
         return finish(a, steps, None, True)
     base = detect_base(root)
     step("repo", "ok", f"{root} (base {base})")
 
-    # 2. register with Orca
+    # 2. register with Orca. A dry run makes no orca call at all, not even a read: it must
+    # work where Orca isn't running.
     try:
-        repos = orca("repo", "list").get("repos") or []
-        if any(os.path.realpath(r.get("path") or "") == os.path.realpath(root) for r in repos):
+        if dry:
+            step("orca", "would (dry-run)", f"would check registration; orca repo add --path {root} if missing")
+        elif any(os.path.realpath(r.get("path") or "") == os.path.realpath(root)
+                 for r in orca("repo", "list").get("repos") or []):
             step("orca", "skipped (already registered)")
-        elif dry:
-            step("orca", "would (dry-run)", f"orca repo add --path {root}")
         else:
             orca("repo", "add", "--path", root)
             step("orca", "ok", "registered")
@@ -200,19 +206,32 @@ def main(argv=None):
 
     # 3. config
     existing = cfgmod.config_path(root)
-    test_cmd, test_why = detect_test_command(root)
-    new = build_config(a, base, test_cmd)
+    guess, test_why = detect_test_command(root)
+    new = build_config(a, base, guess)
     dest = existing or os.path.join(root, "orca-flow.json")
-    if existing and not a.force_config:
-        with open(existing, encoding="utf-8") as f:
-            cfg = json.load(f)
-        step("config", "skipped (already exists)", f"{existing}; --force-config to rewrite it")
-    else:
-        old_text = ""
-        if existing:
+    old_text, old = "", None
+    if existing:
+        try:
             with open(existing, encoding="utf-8") as f:
                 old_text = f.read()
-            new = rewrite(new, json.loads(old_text or "{}"), explicit(a))
+            old = json.loads(old_text or "{}")
+            if not isinstance(old, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            old = None
+            detail = f"{existing}: {e}; fix or delete it by hand, then rerun"
+    if existing and old is None:
+        # Not even --force-config rewrites it: the file can't be merged, and replacing it
+        # would silently drop whatever the user meant to put there.
+        failed = True
+        cfg = None
+        step("config", "failed (invalid JSON)", detail)
+    elif existing and not a.force_config:
+        cfg = old
+        step("config", "skipped (already exists)", f"{existing}; --force-config to rewrite it")
+    else:
+        if existing:
+            new = rewrite(new, old, explicit(a))
         cfg = new
         text = dump(new)
         if existing and not a.json:
@@ -228,7 +247,7 @@ def main(argv=None):
                 f.write(text)
             os.replace(tmp, dest)
             step("config", "ok", f"{'rewrote' if existing else 'wrote'} {dest}"
-                 + ("" if a.test_command else f"; test_command: {test_cmd or 'null'} ({test_why})"))
+                 + ("" if a.test_command else f"; test_command: {guess[0] if guess else 'null'} ({test_why})"))
 
     # 4. shared directory
     common = cfgmod.common_dir(root)

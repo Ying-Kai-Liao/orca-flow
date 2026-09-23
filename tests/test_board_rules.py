@@ -319,6 +319,55 @@ class BoardNoQueueTest(unittest.TestCase):
         self.assertEqual(got, {"a": ("done", True), "b": ("unhanded_pr", False)})
 
 
+class RepoQueueEnabledTest(unittest.TestCase):
+    """board.repo_queue_enabled itself, against real files."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "repo")
+        subprocess.run(["git", "init", "-q", self.root], check=True)
+        env = {k: v for k, v in os.environ.items() if k != "ORCA_FLOW_CONFIG"}
+        p = mock.patch.dict(os.environ, env, clear=True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def write(self, rel, text):
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_no_config_has_a_queue(self):
+        import board
+        self.assertTrue(board.repo_queue_enabled(self.root))
+
+    def test_disabled(self):
+        import board
+        self.write("orca-flow.json", '{"merge_queue": {"enabled": false}}')
+        self.assertFalse(board.repo_queue_enabled(self.root))
+
+    def test_dot_claude_config_is_found(self):
+        import board
+        self.write(".claude/orca-flow.json", '{"merge_queue": {"enabled": false}}')
+        self.assertFalse(board.repo_queue_enabled(self.root))
+
+    def test_unreadable_config_counts_as_queue(self):
+        import board
+        self.write("orca-flow.json", "{not json")
+        self.assertTrue(board.repo_queue_enabled(self.root))
+        self.write("orca-flow.json", "[1, 2]")
+        self.assertTrue(board.repo_queue_enabled(self.root))
+
+    def test_orca_flow_config_env_is_ignored(self):
+        import board
+        other = self.write("elsewhere.json", '{"merge_queue": {"enabled": false}}')
+        with mock.patch.dict(os.environ, {"ORCA_FLOW_CONFIG": other}):
+            self.assertTrue(board.repo_queue_enabled(self.root))
+
+
 class WatchDiffTest(unittest.TestCase):
     def test_only_changed_new_and_gone_rows(self):
         import board

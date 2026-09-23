@@ -18,6 +18,7 @@ from unittest import mock
 
 SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, SCRIPTS)
+import config as cfgmod  # noqa: E402
 import init  # noqa: E402
 import spawn_worker  # noqa: E402
 
@@ -55,12 +56,16 @@ class FakeOrca:
         raise AssertionError(f"unexpected orca call {args}")
 
 
-def run_init(root, orca, *flags):
+def run_init(root, orca, *flags, env=None):
     out = io.StringIO()
-    with mock.patch.dict(os.environ, CLEAN_ENV, clear=True), mock.patch.object(init, "orca", orca), \
-            contextlib.redirect_stdout(out):
-        code = init.main(["--repo", root, "--json", *flags])
+    with mock.patch.dict(os.environ, dict(CLEAN_ENV, **(env or {})), clear=True), \
+            mock.patch.object(init, "orca", orca), contextlib.redirect_stdout(out):
+        code = init.main((["--repo", root] if root else []) + ["--json", *flags])
     return code, json.loads(out.getvalue())
+
+
+def git(*args):
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True, capture_output=True)
 
 
 def statuses(res):
@@ -86,13 +91,56 @@ class InitTest(unittest.TestCase):
         cfg = self.read_cfg(root)
         self.assertEqual(cfg["base_branch"], "main")  # no origin remote
         self.assertEqual(cfg["language"], "English")
-        self.assertEqual(cfg["worker"]["test_command"], init.UNITTEST)
-        self.assertIsNone(cfg["worker"]["full_check_command"])
+        self.assertEqual(cfg["worker"]["test_command"], "python3 -m unittest {files}")
+        self.assertEqual(cfg["worker"]["full_check_command"], "python3 -m unittest discover -s tests")
         self.assertIs(cfg["merge_queue"]["enabled"], True)
         for d in ("briefs", "queue", "bin"):
             self.assertTrue(os.path.isdir(os.path.join(root, ".git", "orca-flow", d)))
-        self.assertIn("worker.full_check_command", res["next"])
+        self.assertIn("fill by hand: merge_queue.targets;", res["next"])
         self.assertIn("with a merge queue", res["next"])
+
+    def test_nothing_detected_leaves_both_commands_null(self):
+        root = git_repo(self.tmp.name)
+        _, res = run_init(root, FakeOrca())
+        cfg = self.read_cfg(root)
+        self.assertIsNone(cfg["worker"]["test_command"])
+        self.assertIsNone(cfg["worker"]["full_check_command"])
+        self.assertIn("worker.test_command, worker.full_check_command", res["next"])
+
+    def test_repo_defaults_to_cwd_not_the_skill_repo(self):
+        root = git_repo(self.tmp.name)
+        sub = os.path.join(root, "sub")
+        os.makedirs(sub)
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(sub)
+        _, res = run_init(None, FakeOrca(), "--dry-run")
+        self.assertIn(root, res["steps"][0]["detail"])
+
+    def test_repo_from_env(self):
+        root = git_repo(self.tmp.name)
+        _, res = run_init(None, FakeOrca(), "--dry-run", env={"ORCA_FLOW_REPO": root})
+        self.assertIn(root, res["steps"][0]["detail"])
+
+    def test_not_a_repo_fails_cleanly(self):
+        plain = os.path.join(self.tmp.name, "plain")
+        os.makedirs(plain)
+        code, res = run_init(plain, FakeOrca())
+        self.assertEqual(code, 1)
+        self.assertEqual(statuses(res), {"repo": "failed"})
+
+    def test_invalid_existing_config_fails_without_traceback(self):
+        for force in ([], ["--force-config"]):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = git_repo(tmp)
+                with open(os.path.join(root, "orca-flow.json"), "w", encoding="utf-8") as f:
+                    f.write("{oops")
+                code, res = run_init(root, FakeOrca(), *force)
+                self.assertEqual(code, 1, force)
+                self.assertEqual(statuses(res)["config"], "failed (invalid JSON)", force)
+                self.assertEqual(statuses(res)["shared"], "ok", force)
+                with open(os.path.join(root, "orca-flow.json"), encoding="utf-8") as f:
+                    self.assertEqual(f.read(), "{oops", force)
 
     def test_second_run_skips_everything(self):
         root = git_repo(self.tmp.name)
@@ -163,7 +211,8 @@ class InitTest(unittest.TestCase):
                                          "shared": "would (dry-run)"})
         self.assertFalse(os.path.exists(os.path.join(root, "orca-flow.json")))
         self.assertFalse(os.path.exists(os.path.join(root, ".git", "orca-flow")))
-        self.assertEqual(orca.calls, [("repo", "list")])
+        self.assertEqual(orca.calls, [])
+        self.assertIn("would check registration", res["steps"][1]["detail"])
 
     def test_base_branch_from_origin_head(self):
         root = git_repo(self.tmp.name)
@@ -178,14 +227,50 @@ class InitTest(unittest.TestCase):
         self.assertEqual(init.detect_base(root), "origin/main")
 
     def test_test_command_guess(self):
-        cases = [({"package.json": '{"scripts": {"test": "vitest"}}'}, "npm test"),
+        cases = [({"package.json": '{"scripts": {"test": "vitest"}}'}, ("npm test -- {files}", "npm test")),
                  ({"package.json": '{"scripts": {}}'}, None),
-                 ({"pyproject.toml": ""}, init.UNITTEST),
+                 ({"pyproject.toml": ""}, ("python3 -m unittest {files}", "python3 -m unittest discover -s tests")),
                  ({"package.json": '{"scripts": {"test": "jest"}}', "tests/a.py": ""}, None),
                  ({}, None)]
         for i, (files, want) in enumerate(cases):
             root = git_repo(os.path.join(self.tmp.name, str(i)), files)
             self.assertEqual(init.detect_test_command(root)[0], want, files)
+
+
+class RepoRootTest(unittest.TestCase):
+    """config.repo_root() when the skill is a standalone clone run from one of its linked
+    worktrees (how this repo is developed), and when it is installed inside a project."""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.tmp])
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        self.project = git_repo(os.path.join(self.tmp, "p"))
+
+    def root_from(self, skill_dir, cwd):
+        os.chdir(cwd)
+        with mock.patch.dict(os.environ, CLEAN_ENV, clear=True), mock.patch.object(cfgmod, "SKILL_DIR", skill_dir):
+            return cfgmod.repo_root()
+
+    def test_linked_worktree_of_standalone_skill_uses_cwd(self):
+        skill = os.path.join(self.tmp, "skill")
+        os.makedirs(skill)
+        git("init", "-q", "-b", "main", skill)
+        open(os.path.join(skill, "SKILL.md"), "w").close()
+        git("-C", skill, "add", "SKILL.md")
+        git("-C", skill, "commit", "-q", "-m", "x")
+        wt = os.path.join(self.tmp, "wt", "init")
+        git("-C", skill, "worktree", "add", "-q", "-b", "me/init", wt)
+        self.assertTrue(cfgmod.is_standalone(wt))
+        self.assertEqual(os.path.realpath(self.root_from(wt, self.project)), self.project)
+        self.assertEqual(os.path.realpath(self.root_from(skill, self.project)), self.project)
+
+    def test_skill_inside_a_project_uses_the_project(self):
+        skill = os.path.join(self.project, ".claude", "skills", "orca-flow")
+        os.makedirs(skill)
+        self.assertFalse(cfgmod.is_standalone(skill))
+        self.assertEqual(os.path.realpath(self.root_from(skill, self.tmp)), self.project)
 
 
 class EnsureTrustedTest(unittest.TestCase):
@@ -234,6 +319,19 @@ class EnsureTrustedTest(unittest.TestCase):
         self.write({"projects": {"/w/a": {"hasTrustDialogAccepted": True}}})
         self.assertIn("already", spawn_worker.ensure_trusted("/w/a", self.cj))
         self.assertFalse(os.path.exists(self.cj + ".orca-flow.bak"))
+
+    def test_write_failure_is_a_note_and_leaves_no_tmp(self):
+        self.write({"projects": {}})
+        with mock.patch.object(spawn_worker.os, "replace", side_effect=OSError("disk full")):
+            note = spawn_worker.ensure_trusted("/w/a", self.cj)
+        self.assertTrue(note.startswith("skipped trust:"), note)
+        self.assertEqual(self.read(), {"projects": {}})
+        self.assertEqual(sorted(os.listdir(self.tmp.name)), [".claude.json", ".claude.json.orca-flow.bak"])
+
+    def test_non_object_projects_is_left_alone(self):
+        self.write({"projects": []})
+        self.assertIn("skipped", spawn_worker.ensure_trusted("/w/a", self.cj))
+        self.assertEqual(self.read(), {"projects": []})
 
     def test_backup_created_once_per_run(self):
         original = {"projects": {}}
@@ -294,6 +392,14 @@ class ClassifyTailTest(unittest.TestCase):
         verdict, note = spawn_worker.classify_tail(["Bye!", "me@host:~/w/init$"], PROMPT)
         self.assertEqual(verdict, "worker exited")
         self.assertNotIn("init.py", note)
+
+    def test_dialog_still_on_screen_gets_the_hint(self):
+        verdict, note = spawn_worker.classify_tail(TAIL_EXITED[:5], PROMPT)
+        self.assertEqual(verdict, "accepted, not confirmed")
+        self.assertIn("init.py", note)
+
+    def test_no_dialog_no_hint(self):
+        self.assertNotIn("init.py", spawn_worker.classify_tail(TAIL_NO_ECHO, PROMPT)[1])
 
     def test_empty_tail(self):
         self.assertEqual(spawn_worker.classify_tail([], PROMPT)[0], "accepted, not confirmed")

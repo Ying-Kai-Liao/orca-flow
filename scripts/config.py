@@ -115,6 +115,18 @@ def _root_from(cwd):
     return os.path.dirname(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
 
 
+def is_standalone(skill_dir):
+    """True when skill_dir is the top of its own git checkout (a clone, or a linked worktree
+    of one), as opposed to a folder inside some project's checkout."""
+    r = subprocess.run(["git", "-C", skill_dir, "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True)
+    top = r.stdout.strip() if r.returncode == 0 else ""
+    if not top:
+        return False
+    return (os.path.realpath(top) == os.path.realpath(skill_dir)
+            or os.path.isfile(os.path.join(top, "SKILL.md")))
+
+
 def repo_root():
     """The project this skill is being used on.
 
@@ -122,13 +134,16 @@ def repo_root():
     reliable answer, and it stays right whatever the caller's cwd is. Installed standalone
     (a clone in ~/.claude/skills, which is a git repo of its own), that location would
     resolve to this repository instead of the user's, so fall back to the caller's cwd.
-    $ORCA_FLOW_REPO overrides both."""
+    $ORCA_FLOW_REPO overrides both.
+
+    Standalone is judged by the skill directory's own toplevel, not by the main checkout:
+    run from a linked worktree of this repo, the main checkout is somewhere else, and
+    comparing against it made every script treat the skill repo as the user's project."""
     env = os.environ.get("ORCA_FLOW_REPO")
     if env:
         return os.path.abspath(os.path.expanduser(env))
     skill_repo = _root_from(SKILL_DIR)
-    standalone = bool(skill_repo) and os.path.realpath(skill_repo) == os.path.realpath(SKILL_DIR)
-    if skill_repo and not standalone:
+    if skill_repo and not is_standalone(SKILL_DIR):
         return skill_repo
     return _root_from(os.getcwd()) or skill_repo
 
@@ -142,9 +157,11 @@ def common_dir(root=None):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def config_path(root=None):
+def config_path(root=None, use_env=True):
+    """use_env=False skips $ORCA_FLOW_CONFIG: for callers that read other repos' configs
+    (board.py), where one repo's override must not stand in for every repo's file."""
     root = root or repo_root()
-    env = os.environ.get("ORCA_FLOW_CONFIG")
+    env = os.environ.get("ORCA_FLOW_CONFIG") if use_env else None
     if env:
         return os.path.abspath(os.path.expanduser(env))
     if not root:

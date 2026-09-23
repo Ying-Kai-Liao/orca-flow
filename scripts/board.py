@@ -102,10 +102,16 @@ def handover_status(common, number):
 
 def repo_queue_enabled(root):
     """merge_queue.enabled from that repo's own config. The board spans every repo on the
-    host, so this can't use the config of the repo the skill resolved to. A config that
-    can't be read counts as having a queue: reporting an unhanded PR is the safer mistake."""
+    host, so this can't use the config of the repo the skill resolved to, nor
+    $ORCA_FLOW_CONFIG, which names one repo's file. A config that can't be read counts as
+    having a queue: reporting an unhanded PR is the safer mistake."""
     try:
-        return cfgmod.queue_enabled(cfgmod.load(root))
+        path = cfgmod.config_path(root, use_env=False)
+        if not path:
+            return True
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        return cfgmod.queue_enabled(raw if isinstance(raw, dict) else {})
     except (OSError, ValueError):
         return True
 

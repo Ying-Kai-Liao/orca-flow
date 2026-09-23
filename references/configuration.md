@@ -63,16 +63,20 @@ python3 scripts/init.py [--repo <path>] [--test-command "…"] [--full-check "�
                         [--model …] [--no-queue] [--force-config] [--dry-run] [--json]
 ```
 Idempotent; one line per step, each `ok`, `skipped (already …)` or `would (dry-run)`:
-1. resolves the repo root and base branch (`origin/HEAD` if the remote has one, else the
+1. resolves the repo root (`--repo`, else `$ORCA_FLOW_REPO`, else the current directory;
+   never the skill's own repo) and base branch (`origin/HEAD` if the remote has one, else the
    current branch);
-2. registers the repo with Orca (`orca repo add`) if `orca repo list` doesn't have it;
+2. registers the repo with Orca (`orca repo add`) if `orca repo list` doesn't have it. A dry
+   run makes no orca call;
 3. writes `<repo>/orca-flow.json` if no config file exists anywhere in the lookup order.
-   `test_command` is guessed only when there's one obvious answer (`package.json` with a
-   `test` script → `npm test`; `pyproject.toml` or `tests/` → `python3 -m unittest discover -s
-   tests`), else left null. An existing file is never touched unless `--force-config`, which
+   The test commands are guessed only when there's one obvious answer: `package.json` with a
+   `test` script → `npm test -- {files}` / full check `npm test`; `pyproject.toml` or `tests/`
+   → `python3 -m unittest {files}` / full check `python3 -m unittest discover -s tests`.
+   Otherwise both stay null. An existing file is never touched unless `--force-config`, which
    prints a diff and rewrites it: values already in the file win over detected defaults, flags
    win over both, and unknown keys are kept. (So `--force-config` never turns a queue back on;
-   edit `merge_queue.enabled` by hand for that.)
+   edit `merge_queue.enabled` by hand for that.) An existing file that isn't valid JSON is
+   reported as `failed (invalid JSON)` and left alone, with or without `--force-config`.
 4. creates `<git-common-dir>/orca-flow/{briefs,queue,bin}`;
 5. prints `next:` with the values still null and whether the repo runs with or without a queue.
 

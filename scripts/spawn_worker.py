@@ -233,23 +233,34 @@ def ensure_trusted(path, claude_json=None):
     if not isinstance(data, dict):
         return f"skipped trust: {cj} is not a JSON object; not touching it"
     projects = data.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        return f"skipped trust: {cj} has a non-object \"projects\"; not touching it"
     entry = projects.get(path)
     if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
         return f"already trusted: {path}"
-    if cj not in _backed_up:
-        # Once per run: a second worker spawned by the same run must not replace the
-        # untouched original with a copy that already has the first worker's entry.
-        shutil.copy2(cj, cj + ".orca-flow.bak")
-        _backed_up.add(cj)
     if not isinstance(entry, dict):
         entry = projects[path] = {"allowedTools": [], "mcpServers": {}}
     entry["hasTrustDialogAccepted"] = True
     # Claude Code sessions rewrite this file all the time; tmp + rename means a reader never
     # sees half a file, and the window for losing their write is one read-modify-write.
     tmp = f"{cj}.tmp-{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, cj)
+    try:
+        if cj not in _backed_up:
+            # Once per run: a second worker spawned by the same run must not replace the
+            # untouched original with a copy that already has the first worker's entry.
+            shutil.copy2(cj, cj + ".orca-flow.bak")
+            _backed_up.add(cj)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, cj)
+    except OSError as e:
+        # A trust failure must not stop the spawn: the post-send check still catches a worker
+        # that quit at the dialog.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return f"skipped trust: could not write {cj} ({e.__class__.__name__}: {e})"
     return f"trusted {path}"
 
 
@@ -274,17 +285,18 @@ def classify_tail(lines, prompt):
     rows = [l.rstrip() for l in lines or [] if l and l.strip()]
     tail_text = "\n".join(rows)
     low = tail_text.lower()
-    trust = all(t in low for t in TRUST_DIALOG)
+    # The dialog can still be on screen (not yet answered) or already behind a shell prompt;
+    # either way the manager needs to know the path wasn't trusted.
+    hint = (". The trust dialog is in the tail: this worktree path isn't trusted. Run scripts/init.py if "
+            "the repo was never set up, and check the spawn output's trust note"
+            if all(t in low for t in TRUST_DIALOG) else "")
     if rows and SHELL_PROMPT.match(rows[-1].strip()):
-        note = "the last line is a bare shell prompt: the agent is not running"
-        if trust:
-            note += ". The trust dialog is in the tail: run scripts/init.py (or --continue, which trusts the path) and retry"
-        return "worker exited", note
+        return "worker exited", "the last line is a bare shell prompt: the agent is not running" + hint
     if any(m in tail_text for m in TUI_MARKERS):
         if _squash(prompt)[:60] and _squash(prompt)[:60] in _squash(tail_text):
-            return "delivered", "the TUI shows the prompt"
-        return "accepted, not confirmed", "the TUI is up but the prompt isn't visible in the tail"
-    return "accepted, not confirmed", "no TUI or shell prompt recognised in the tail"
+            return "delivered", "the TUI shows the prompt" + hint
+        return "accepted, not confirmed", "the TUI is up but the prompt isn't visible in the tail" + hint
+    return "accepted, not confirmed", "no TUI or shell prompt recognised in the tail" + hint
 
 
 def read_tail(handle, limit=25):
@@ -382,7 +394,7 @@ def continue_worker(a, cfg, wt, brief_dir, brief_path, common_path, test_lock, a
         f.write(render_rules(cfg, test_lock, base))
     write_manager(brief_dir, a.manager)
     orca("worktree", "set", "--worktree", f"id:{wt.get('id')}", "--comment", f"continued: {brief_title(brief_path)}", "--workspace-status", "in-progress", context=base_info)
-    base_info["trust"] = ensure_trusted(path)
+    base_info["trust"] = ensure_trusted(path) if path else "skipped trust: the worktree has no path"
     start_agent(wt.get("id"), agent_cmd, prompt, base_info, title="worker (cont.)")
 
 
