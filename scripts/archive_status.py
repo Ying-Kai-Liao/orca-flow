@@ -20,6 +20,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -54,7 +55,11 @@ def main():
     if not state_file:
         print(json.dumps({"ok": False, "error": "merge_queue.state_file is not configured"}))
         sys.exit(1)
-    root = cfg["repo_root"]
+    # The state file is edited in the checkout you're standing in (the queue's clean
+    # worktree), not in the main checkout the config resolves to: worktrees share one
+    # git common dir, and the main checkout is often stale or dirty.
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    root = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else cfg["repo_root"]
     src = os.path.join(root, state_file)
     if not os.path.isfile(src):
         print(json.dumps({"ok": False, "error": f"{src} not found"}))
