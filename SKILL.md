@@ -98,6 +98,12 @@ whole status file.
    ```
    - **All workers:** `worktrees.py inventory`. Besides one line per worktree it lists agents
      waiting on the user and open PRs nobody has handed to the queue.
+   - **Board:** `python3 scripts/board.py` shows every agent pane on this host, across all
+     repos, with a derived `attention` (`needs_human`, `blocked`, `unhanded_pr`, `stale`,
+     `handoff`, …) and the rule that fired, most urgent first. It catches a worker asking a
+     question in prose, which Orca shows as `done`. `--watch` prints only changes; `--json`
+     and `--write` give the rows to other tools. It only reads. Rules and row schema:
+     `references/board.md`.
    - **Details:** `orca terminal read --terminal <handle> --limit 60 --json`.
    - **No polling with `sleep`:** a foreground `sleep` is blocked by the harness.
    - **Context:** the `ctx` column (or `worktrees.py context`) shows each worker's estimated
