@@ -102,6 +102,7 @@ def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN):
     3. The agent stopped and its last message asks something (prose questions look like done),
        unless it has sat unanswered for longer than question_max_min: then it is done.
     4. An open, non-draft PR nobody handed to the queue, with no agent still working on it.
+       In a repo with no queue (row["no_queue"]) there is nobody to hand it to: done.
     5. Working, but no update for longer than stale_min.
     6. Plain working / done / idle; anything else is unknown.
     """
@@ -123,6 +124,8 @@ def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN):
     pr = row.get("pr") or {}
     if (pr.get("number") and (pr.get("state") or "").upper() == "OPEN" and pr.get("isDraft") is not True
             and (not row.get("handover") or row.get("handover") in NOT_HANDED) and state not in WORKING_STATES):
+        if row.get("no_queue"):
+            return "done", f"PR #{pr['number']} is open; no queue in this repo"
         why = "was sent back by the queue" if row.get("handover") in NOT_HANDED else "has no handover file"
         return "unhanded_pr", f"PR #{pr['number']} is open and {why}"
     if state in WORKING_STATES:
@@ -141,10 +144,10 @@ def _minutes(now_ms, then_ms):
     return round((now_ms - then_ms) / 60000, 1) if then_ms else None
 
 
-def make_row(wt, agent, now_ms, pr=None, handover=None):
+def make_row(wt, agent, now_ms, pr=None, handover=None, no_queue=False):
     """One board row from a `worktree ps` worktree and one of its agents (None for a worktree
-    with no agent pane). pr and handover come from the caller, which can call gh and read
-    the queue directory; this function can't."""
+    with no agent pane). pr, handover and no_queue come from the caller, which can call gh
+    and read the queue directory and the repo's config; this function can't."""
     agent = agent or {}
     msg = (agent.get("lastAssistantMessage") or "").strip()
     return {
@@ -161,6 +164,7 @@ def make_row(wt, agent, now_ms, pr=None, handover=None):
         "unread": bool(wt.get("unread")),
         "pr": pr,
         "handover": handover,
+        "no_queue": bool(no_queue),
         "pane": agent.get("paneKey"),
         "agent_type": agent.get("agentType"),
         "state": agent.get("state"),

@@ -309,11 +309,11 @@ def unhanded_prs(repo_root):
     return rows
 
 
-def pr_row(u):
+def pr_row(u, no_queue=False):
     """An unhanded_prs() entry as a board row with no agent pane, so classify decides it.
     unhanded_prs() already dropped drafts; the list only holds open PRs."""
     return {"pr": {"number": u["number"], "state": "OPEN", "isDraft": False}, "handover": u["handover"],
-            "state": None, "comment": ""}
+            "state": None, "comment": "", "no_queue": no_queue}
 
 
 def cmd_context(rows, name):
@@ -393,8 +393,10 @@ def main():
     if a.cmd == "inventory":
         repo_root, _ = repo_context()
         unhanded = unhanded_prs(repo_root)
+        no_queue = not cfgmod.queue_enabled(CFG)
         if a.json:
-            print(json.dumps({"worktrees": rows, "open_prs": unhanded}, ensure_ascii=False, indent=1))
+            print(json.dumps({"worktrees": rows, "open_prs": unhanded, "merge_queue": not no_queue},
+                             ensure_ascii=False, indent=1))
             return
         for r in sorted(rows, key=lambda r: r["name"]):
             pr = f"#{r['pr']['number']} {r['pr']['state']}" if r["pr"] else ("on-base" if r["on_base"] else "-")
@@ -409,14 +411,17 @@ def main():
         if unhanded is None:
             print("\n! gh pr list failed; open PRs not checked")
         else:
-            missing = [u for u in unhanded if board_rules.classify(pr_row(u))[0] == "unhanded_pr"]
+            missing = [u for u in unhanded if board_rules.classify(pr_row(u, no_queue))[0] == "unhanded_pr"]
             if missing:
                 print("\nOpen PRs with no handover file (the queue doesn't know about these):")
                 for u in missing:
                     back = "  [sent back by the queue]" if u["handover"] else ""
                     print(f"  #{u['number']} {u['branch']}  {u['title'][:60]}  (updated {u['updated'][:10]}){back}")
             done = [u for u in unhanded if u["handover"] and u not in missing]
-            if done:
+            if no_queue and unhanded:
+                print("\nOpen PRs (no merge queue in this repo; review and merge them yourself): "
+                      + ", ".join(f"#{u['number']} {u['branch']}" for u in unhanded))
+            elif done:
                 print("\nOpen PRs already handed over: " + ", ".join(f"#{u['number']} ({u['handover']})" for u in done))
         return
 

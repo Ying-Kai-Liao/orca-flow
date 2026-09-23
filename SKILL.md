@@ -13,6 +13,7 @@ collide over merging, deploying and shared status files, so exactly one session 
 | **Manager** | main checkout | writes briefs, starts workers, reviews PRs, hands approved PRs to the queue | edits feature code, merges, deploys |
 | **Worker** | `<task>` worktree | builds one task, runs targeted tests, pushes a PR | merges, deploys, runs the full suite, starts other workers |
 | **Merge queue** | its own clean worktree | merges, runs the full check once per batch, deploys, updates the status file | builds features |
+| **Manager, no queue** (`merge_queue.enabled: false`) | main checkout | the manager's work, plus reviewing and merging PRs itself | edits feature code |
 
 The main checkout stays on the base branch. Changes happen in Orca worktrees. If the
 `main_checkout_guard.py` hook is installed, Edit and Write in the main checkout are blocked
@@ -47,6 +48,20 @@ whole status file.
 - **`--worktree active` is fine,** because it resolves from your current directory.
 
 ## Manager: from request to workers
+
+**First run in a repo** (no `orca-flow.json` yet, or Orca doesn't list the repo):
+```
+python3 scripts/init.py [--test-command "…"] [--full-check "…"] [--no-queue] [--dry-run]
+```
+It registers the repo with Orca, writes `orca-flow.json` (never over an existing one), creates
+`<git-common-dir>/orca-flow/`, and ends with a `next:` line naming the config values still
+null. Fill those by hand before starting workers. It's safe to rerun. Workers' Claude Code
+trust is set per worktree path by `spawn_worker.py`, so the safety-check dialog doesn't stop them.
+
+**No queue** (`merge_queue.enabled: false`, for a small repo): step 8 changes. You review the
+PR, run `worker.full_check_command` (if set) from a clean worktree on the PR's head, then
+merge with `gh pr merge <pr> --<merge_queue.merge_method>` (default `squash`). `handover.py
+send` refuses in such a repo, and open PRs aren't reported as unhanded.
 
 1. **Check the work isn't already done.** Look at `git log --oneline -30 <base branch>`,
    `gh pr list --state all --limit 30` and the relevant code. Requests often arrive after
@@ -88,7 +103,9 @@ whole status file.
    - **`--bypass`:** pass it only when this manager session also runs with bypassPermissions.
      Otherwise workers stall on prompts nobody sees.
    - **Failures:** report the printed error. If the send step failed, the prompt may have
-     arrived anyway. Read the terminal first and never re-send.
+     arrived anyway. Read the terminal first and never re-send. Exit code 2 (`worker exited`)
+     means the agent had quit before the prompt arrived; start it again in that terminal and
+     send the prompt by hand.
 5. **Tell the user** each worker's name, worktree path and terminal handle.
 6. **Watch the Orca card, not the terminal text.** Workers finish by setting their card to
    `in-review` with the comment `PR #n:…`, or by commenting `BLOCKED:…`. To wait for one

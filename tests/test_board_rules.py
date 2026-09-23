@@ -181,6 +181,30 @@ class ClassifyTest(unittest.TestCase):
     def test_pr_without_agent_pane(self):
         self.assertAttention(row(a=None, pr=OPEN_PR), "unhanded_pr")
 
+    # a repo with merge_queue.enabled false has nobody to hand a PR to
+    def test_no_queue_open_pr_is_done(self):
+        r = make_row(wt(), agent(), NOW, pr=OPEN_PR, no_queue=True)
+        attention, reason = classify(r)
+        self.assertEqual(attention, "done")
+        self.assertIn("no queue in this repo", reason)
+
+    def test_no_queue_pr_without_agent_pane_is_done(self):
+        self.assertAttention(make_row(wt(), None, NOW, pr=OPEN_PR, no_queue=True), "done")
+
+    def test_no_queue_does_not_hide_questions_or_blocked(self):
+        self.assertAttention(make_row(wt(), agent(msg="Which one?"), NOW, pr=OPEN_PR, no_queue=True), "needs_human")
+        self.assertAttention(make_row(wt(comment="BLOCKED: x"), agent(), NOW, pr=OPEN_PR, no_queue=True), "blocked")
+
+    def test_no_queue_working_agent_is_working(self):
+        r = make_row(wt(), agent("working", updated_min=1), NOW, pr=OPEN_PR, no_queue=True)
+        self.assertAttention(r, "working")
+
+    def test_inventory_pr_row_no_queue(self):
+        import worktrees
+        u = {"number": 9, "handover": None}
+        self.assertEqual(classify(worktrees.pr_row(u))[0], "unhanded_pr")
+        self.assertEqual(classify(worktrees.pr_row(u, no_queue=True))[0], "done")
+
     # stale / working
     def test_stale(self):
         self.assertAttention(row(a=agent("working", started_min=90, updated_min=31)), "stale")
@@ -276,6 +300,72 @@ class PaneLabelTest(unittest.TestCase):
         with mock.patch.object(board, "orca", side_effect=lambda *a: fake[a]):
             rows, _ = board.collect(30, use_gh=False)
         self.assertEqual(sorted(r["label"] for r in rows), ["one", "two@cccc:dddd", "two@cccc:eeee"])
+
+
+class BoardNoQueueTest(unittest.TestCase):
+    def test_repo_config_decides_per_repo(self):
+        import board
+        a = wt(worktreeId="a::/w/a", repoId="a", path="/w/a", agents=[agent()])
+        b = wt(worktreeId="b::/w/b", repoId="b", path="/w/b", agents=[agent()],
+               linkedPR={"number": 4, "state": "open", "title": "x"})
+        a["linkedPR"] = {"number": 3, "state": "open", "title": "x"}
+        fake = {("worktree", "ps", "--limit", "1000"): {"worktrees": [a, b]},
+                ("repo", "list"): {"repos": [{"id": "a", "path": "/tmp"}, {"id": "b", "path": "/"}]}}
+        with mock.patch.object(board, "orca", side_effect=lambda *x: fake[x]), \
+                mock.patch.object(board, "git_common_dir", return_value=None), \
+                mock.patch.object(board, "repo_queue_enabled", side_effect=lambda root: root != "/tmp"):
+            rows, _ = board.collect(30, use_gh=False)
+        got = {r["worktree"]: (r["attention"], r["no_queue"]) for r in rows}
+        self.assertEqual(got, {"a": ("done", True), "b": ("unhanded_pr", False)})
+
+
+class RepoQueueEnabledTest(unittest.TestCase):
+    """board.repo_queue_enabled itself, against real files."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, "repo")
+        subprocess.run(["git", "init", "-q", self.root], check=True)
+        env = {k: v for k, v in os.environ.items() if k != "ORCA_FLOW_CONFIG"}
+        p = mock.patch.dict(os.environ, env, clear=True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def write(self, rel, text):
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_no_config_has_a_queue(self):
+        import board
+        self.assertTrue(board.repo_queue_enabled(self.root))
+
+    def test_disabled(self):
+        import board
+        self.write("orca-flow.json", '{"merge_queue": {"enabled": false}}')
+        self.assertFalse(board.repo_queue_enabled(self.root))
+
+    def test_dot_claude_config_is_found(self):
+        import board
+        self.write(".claude/orca-flow.json", '{"merge_queue": {"enabled": false}}')
+        self.assertFalse(board.repo_queue_enabled(self.root))
+
+    def test_unreadable_config_counts_as_queue(self):
+        import board
+        self.write("orca-flow.json", "{not json")
+        self.assertTrue(board.repo_queue_enabled(self.root))
+        self.write("orca-flow.json", "[1, 2]")
+        self.assertTrue(board.repo_queue_enabled(self.root))
+
+    def test_orca_flow_config_env_is_ignored(self):
+        import board
+        other = self.write("elsewhere.json", '{"merge_queue": {"enabled": false}}')
+        with mock.patch.dict(os.environ, {"ORCA_FLOW_CONFIG": other}):
+            self.assertTrue(board.repo_queue_enabled(self.root))
 
 
 class WatchDiffTest(unittest.TestCase):

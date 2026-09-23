@@ -25,6 +25,9 @@ Usage:
   config.py get worker.model       # one value; scalars print bare, for shell use
   config.py path                   # which file was loaded (empty if none)
   config.py init [--force]         # write a starter config into <repo>/.claude/
+
+For a repo that has never run orca-flow, use scripts/init.py instead: it also registers the
+repo with Orca, detects the base branch and test command, and creates the shared directory.
 """
 import argparse
 import copy
@@ -71,6 +74,11 @@ DEFAULTS = {
         "transcripts_dir": None,
     },
     "merge_queue": {
+        # false: a small repo with no queue session. The manager reviews and merges PRs itself,
+        # handover.py send refuses, and open PRs are not reported as unhanded.
+        "enabled": True,
+        # How a manager merges when there is no queue: gh pr merge --<method> (squash, merge, rebase).
+        "merge_method": "squash",
         "worktree_name": "merge-queue",
         # A hand-written status file only the queue may edit (e.g. "NOW.md"). null = none.
         "state_file": None,
@@ -107,6 +115,18 @@ def _root_from(cwd):
     return os.path.dirname(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
 
 
+def is_standalone(skill_dir):
+    """True when skill_dir is the top of its own git checkout (a clone, or a linked worktree
+    of one), as opposed to a folder inside some project's checkout."""
+    r = subprocess.run(["git", "-C", skill_dir, "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True)
+    top = r.stdout.strip() if r.returncode == 0 else ""
+    if not top:
+        return False
+    return (os.path.realpath(top) == os.path.realpath(skill_dir)
+            or os.path.isfile(os.path.join(top, "SKILL.md")))
+
+
 def repo_root():
     """The project this skill is being used on.
 
@@ -114,13 +134,16 @@ def repo_root():
     reliable answer, and it stays right whatever the caller's cwd is. Installed standalone
     (a clone in ~/.claude/skills, which is a git repo of its own), that location would
     resolve to this repository instead of the user's, so fall back to the caller's cwd.
-    $ORCA_FLOW_REPO overrides both."""
+    $ORCA_FLOW_REPO overrides both.
+
+    Standalone is judged by the skill directory's own toplevel, not by the main checkout:
+    run from a linked worktree of this repo, the main checkout is somewhere else, and
+    comparing against it made every script treat the skill repo as the user's project."""
     env = os.environ.get("ORCA_FLOW_REPO")
     if env:
         return os.path.abspath(os.path.expanduser(env))
     skill_repo = _root_from(SKILL_DIR)
-    standalone = bool(skill_repo) and os.path.realpath(skill_repo) == os.path.realpath(SKILL_DIR)
-    if skill_repo and not standalone:
+    if skill_repo and not is_standalone(SKILL_DIR):
         return skill_repo
     return _root_from(os.getcwd()) or skill_repo
 
@@ -134,9 +157,11 @@ def common_dir(root=None):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def config_path(root=None):
+def config_path(root=None, use_env=True):
+    """use_env=False skips $ORCA_FLOW_CONFIG: for callers that read other repos' configs
+    (board.py), where one repo's override must not stand in for every repo's file."""
     root = root or repo_root()
-    env = os.environ.get("ORCA_FLOW_CONFIG")
+    env = os.environ.get("ORCA_FLOW_CONFIG") if use_env else None
     if env:
         return os.path.abspath(os.path.expanduser(env))
     if not root:
@@ -180,6 +205,12 @@ def load(root=None):
             allow.append(cfg["merge_queue"]["state_file"])
         cfg["main_checkout"]["allow_files"] = allow
     return cfg
+
+
+def queue_enabled(cfg):
+    """Whether this repo has a merge queue. Only an explicit false turns it off, so a config
+    written before the key existed keeps its queue."""
+    return (cfg.get("merge_queue") or {}).get("enabled") is not False
 
 
 def dig(cfg, dotted):

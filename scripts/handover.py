@@ -17,7 +17,7 @@ with nothing to catch up on.
 
 Usage (manager):
   handover.py send <pr> [--pending "..."] [--verified "..."] [--after-deploy "..."] [--note "..."]
-                   [--report-to <session name>] [--notify <queue terminal handle>] [--dry-run]
+                   [--report-to <session name>] [--notify <queue terminal handle>] [--dry-run] [--force]
   handover.py status <pr>                   # what the queue has done with it (for Monitor loops: prints one word)
 Usage (queue):
   handover.py list [--all]                  # pending handovers in arrival order; warns when a rotation is due
@@ -146,6 +146,12 @@ def one_line(h):
 
 
 def cmd_send(a):
+    # Before gh: a handover file in a repo with no queue is never read, and the manager would
+    # wait on it forever.
+    if not cfgmod.queue_enabled(CFG) and not a.force:
+        method = CFG["merge_queue"].get("merge_method") or "squash"
+        die("this repo has no merge queue (merge_queue.enabled is false); review and merge the PR yourself: "
+            f"gh pr merge {a.pr} --{method}. Pass --force to write the handover anyway.")
     pr = gh_pr(a.pr)
     if pr["state"] != "OPEN":
         die(f"PR #{a.pr} is {pr['state']}, not OPEN")
@@ -296,6 +302,7 @@ def main():
     s.add_argument("--report-to", help="your session name, from ListAgents read just now")
     s.add_argument("--notify", metavar="TERMINAL", help="also send the line to the queue's terminal handle")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--force", action="store_true", help="write the handover even though merge_queue.enabled is false")
     st = sub.add_parser("status")
     st.add_argument("pr", type=int)
     st.add_argument("--json", action="store_true")

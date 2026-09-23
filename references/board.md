@@ -38,7 +38,7 @@ Rules, first match wins:
 | 2 | `blocked` | card comment starts with `BLOCKED` (any case) |
 | 3 | `handoff` | card comment starts with `HANDOFF` (what `worktrees.py status` prints as `handoff`) |
 | 4 | `needs_human` | agent not working, and its last message ends with `?`/`？`, or its **last paragraph** contains a decision request: 拍板, 請確認, 需要你決定, 你決定, "should I", "which do you want", "which one do you want", "do you want me to", "please/can you/could you confirm", "your call", "let me know which". Demoted to `done` ("asked Nh ago, no answer; demoted") when `minutes_in_state` > `question_max_min` |
-| 5 | `unhanded_pr` | PR open, not a draft, no handover file (or one with status `returned`), agent not working |
+| 5 | `unhanded_pr` | PR open, not a draft, no handover file (or one with status `returned`), agent not working. In a repo with `merge_queue.enabled: false` (row `no_queue`) this is `done`, "no queue in this repo" |
 | 6 | `stale` | state `working` and `minutes_since_update` > `stale_min` |
 | 7 | `working` | state `working` |
 | 8 | `done` | state `done` |
@@ -77,8 +77,8 @@ the tab and pane ids in `paneKey`) so the rows can be told apart.
 
 ## Row schema
 
-Built by `board_rules.make_row(ps_worktree, ps_agent_or_None, now_ms, pr=None, handover=None)`.
-All values are plain JSON. `classify` reads only `state`, `comment`, `pr`, `handover`,
+Built by `board_rules.make_row(ps_worktree, ps_agent_or_None, now_ms, pr=None, handover=None, no_queue=False)`.
+All values are plain JSON. `classify` reads only `state`, `comment`, `pr`, `handover`, `no_queue`,
 `minutes_since_update` (for stale), `minutes_in_state` (to demote old questions),
 `last_message_tail` (falls back to `last_message`) and `pane`; missing keys are treated as
 empty.
@@ -96,6 +96,7 @@ empty.
 | `unread` | bool | ps `unread` |
 | `pr` | {number, state, isDraft, title} \| null | `gh pr list` by branch (newest PR for it); else Orca's `linkedPR` with `isDraft: null`; `state` is upper-case (`OPEN`/`MERGED`/`CLOSED`) |
 | `handover` | str \| null | `status` of `queue/<pr>.json`, `?` if unreadable or empty, null if no file; `returned` counts as not handed over |
+| `no_queue` | bool | the repo's `merge_queue.enabled` is `false` (read from that repo's own config); open PRs are then never `unhanded_pr` |
 | `pane` | str \| null | agent `paneKey`; null for a worktree with no agent |
 | `agent_type`, `state`, `working_mode`, `tool` | str \| null | agent `agentType`, `state`, `workingMode`, `toolName` |
 | `prompt` | str | agent `prompt`, first 200 chars |
