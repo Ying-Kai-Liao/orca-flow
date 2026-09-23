@@ -11,8 +11,9 @@ described in the last section.
 
 ## Before you touch anything
 
-- Read every file you're about to change, all the way through, before editing it.
-- Confirm the brief's goal isn't already on `{{BASE}}`. If it's already there, report BLOCKED
+- Read what you're going to change and what calls it. For a small file that means the whole
+  file; for a big one it means the functions you touch plus their callers, found with grep.
+{{BIG_FILE_RULE}}- Confirm the brief's goal isn't already on `{{BASE}}`. If it's already there, report BLOCKED
   instead of building it twice.
 - Screenshots mentioned in the brief sit next to the brief. Open them with Read. If you can't
   open one, report BLOCKED rather than guessing what the screen looks like.
@@ -47,6 +48,21 @@ described in the last section.
 - Stuck: `orca worktree set --worktree active --comment "BLOCKED:<reason, one line>" --json`, and
   write the details in your terminal.
 - `--worktree active` resolves from your cwd, so run it inside your own worktree.
+
+## Handing off and continuing
+
+Your context is finite and you can't see how full it is; the manager can. If the manager
+sends you a line starting with `WRAP UP`, stop building and, in this order:
+
+1. Commit what you have, even if unfinished (`WIP:` prefix in the message), and push.
+2. Write `handoff.md` next to the brief: what's done, what's left (as a checklist), which
+   functions you touched, any decision you made and why, anything the next session must not
+   redo. Keep it under a page.
+3. `orca worktree set --worktree active --comment "HANDOFF: <one line>" --json`, then stop.
+
+A fresh session continues from the brief plus your `handoff.md`. If **you** are that fresh
+session, the prompt that started you said so: read the handoff files it named, check
+`git status` and `git log` yourself before trusting them, and don't redo finished work.
 
 ## When you're unsure
 

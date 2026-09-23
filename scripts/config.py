@@ -58,6 +58,17 @@ DEFAULTS = {
         "run_command": None,
         # Extra project rules, one bullet per string, appended to the worker rules.
         "extra_rules": [],
+        # Files too big to read whole (repo-relative). Workers are told to read only the
+        # functions they touch in these; briefs must give entry points with line ranges.
+        "big_files": [],
+        # Above this many lines, any file counts as big for the rule above.
+        "big_file_lines": 1500,
+        # Context budget: window size the estimate is measured against, and the fraction at
+        # which worktrees.py flags a session and the manager should hand it off.
+        "context_window": 200000,
+        "context_warn": 0.35,
+        # Where Claude Code keeps transcripts; null = ~/.claude/projects (or $CLAUDE_CONFIG_DIR).
+        "transcripts_dir": None,
     },
     "merge_queue": {
         "worktree_name": "merge-queue",
@@ -65,6 +76,16 @@ DEFAULTS = {
         "state_file": None,
         # Deploy targets, in order. Each: {"name", "deploy": [...], "health_url", "backup": [...], "verify": [...]}
         "targets": [],
+        # Retire the queue session after this many batches (its context grows with each one)
+        # and start a fresh one from the handover files.
+        "rotate_after": 10,
+        # archive_status.py keeps this many newest entries in the state file; the rest move
+        # to archive_file (default: <state file stem>-archive.md).
+        "state_file_keep": 10,
+        "archive_file": None,
+        # When expensive post-deploy verification (a real end-to-end run) is worth its cost.
+        # The queue never runs it on its own; a manager asks for it per PR.
+        "heavy_verification": "only for a PR with a migration or an outbound side effect (mail, push, third-party calls), and only when a manager asks for it in the handover",
     },
     "main_checkout": {
         # The PreToolUse hook that keeps the main checkout on its default branch.

@@ -37,9 +37,18 @@ overrides both.
 | `worker.migrations_dir` | none | Directory of numbered migrations. Enables clash detection in `worktrees.py overlap` and the queue's duplicate check. |
 | `worker.run_command` | none | How to start the app, for looking at a UI change before claiming it works. |
 | `worker.extra_rules` | `[]` | Extra bullets appended to the worker rules. Project-specific traps go here. |
+| `worker.big_files` | `[]` | Files workers must never read whole; briefs give entry points with line ranges for them. |
+| `worker.big_file_lines` | `1500` | Above this many lines any file counts as big. |
+| `worker.context_window` | `200000` | Window the context estimate is measured against (`worktrees.py context`). |
+| `worker.context_warn` | `0.35` | Fraction of the window at which a worker is flagged and the manager wraps it up and `--continue`s it. |
+| `worker.transcripts_dir` | `~/.claude/projects` | Where Claude Code writes session transcripts, if not the default (`$CLAUDE_CONFIG_DIR` is honoured). |
 | `merge_queue.worktree_name` | `"merge-queue"` | The clean worktree the queue works from. |
 | `merge_queue.state_file` | none | A hand-written status file only the queue may edit (e.g. `NOW.md`). Workers are told to leave it alone, and the main-checkout guard allows it. |
 | `merge_queue.targets` | `[]` | Deploy targets, in order (below). |
+| `merge_queue.rotate_after` | `10` | Batches after which `handover.py list` tells the queue to retire and a fresh session takes over. |
+| `merge_queue.state_file_keep` | `10` | Entries `archive_status.py` keeps in the status file; older ones move to the archive. |
+| `merge_queue.archive_file` | `<stem>-archive.md` | Where archived status entries go, next to the status file. |
+| `merge_queue.heavy_verification` | migrations or outbound side effects, on request | When an expensive end-to-end check after deploy is worth running. The queue never runs one unasked. |
 | `main_checkout.guard` | `true` | Whether the PreToolUse hook blocks edits to the main checkout. |
 | `main_checkout.allow_files` | `[]` | Files still editable there. `state_file` is added automatically. |
 | `main_checkout.allow_prefixes` | `[".claude/"]` | Path prefixes still editable there. |
@@ -83,6 +92,7 @@ next to the brief. Available placeholders:
 | `{{TEST_LOCK}}` | absolute path to the copied `test-lock.sh` |
 | `{{CHECKS_RULE}}`, `{{TEST_RULE}}`, `{{FULL_CHECK_RULE}}`, `{{RUN_RULE}}` | rendered verification rules, or a sensible fallback when the command isn't configured |
 | `{{MIGRATION_RULE}}` | migration rules, or nothing if there's no migrations directory |
+| `{{BIG_FILE_RULE}}` | the "don't read big files whole" rule, naming `worker.big_files` |
 | `{{STATE_FILE_RULE}}`, `{{STATE_FILE_INLINE}}` | "don't touch the status file", or nothing |
 | `{{EXTRA_RULES}}` | `worker.extra_rules`, one bullet each |
 
