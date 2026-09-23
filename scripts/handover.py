@@ -22,7 +22,7 @@ Usage (manager):
 Usage (queue):
   handover.py list [--all]                  # pending handovers in arrival order; warns when a rotation is due
   handover.py take <pr>                     # mark it as being merged by this session
-  handover.py done <pr> --sha <short sha> [--report "..."]
+  handover.py done <pr> --sha <short sha> [--report "..."] [--no-deploy] [--no-count]
   handover.py back <pr> --reason "..."      # sent back without merging
   handover.py queue start [--session <name>] | queue show | queue retire [--reason "..."]
 """
@@ -235,13 +235,15 @@ def cmd_take(a):
 
 def cmd_done(a):
     h = read(a.pr) or die(f"no handover for PR #{a.pr}")
-    h.update({"status": "done", "deployed": a.sha, "report": a.report, "done_at": now(), "last_by": me(a.session)})
+    h.update({"status": "done", "deployed": None if a.no_deploy else a.sha, "merged": a.sha, "report": a.report,
+              "done_at": now(), "last_by": me(a.session)})
     write(a.pr, h)
     st = read_state()
     if st.get("active"):
         st["active"]["batches"] = st["active"].get("batches", 0) + (1 if a.count_batch else 0)
         write_state(st)
-    line = (f"[merge-queue] PR #{h['pr']} merged and deployed {a.sha} | {a.report or ''} | "
+    what = f"merged {a.sha} (not deployed)" if a.no_deploy else f"merged and deployed {a.sha}"
+    line = (f"[merge-queue] PR #{h['pr']} {what} | {a.report or ''} | "
             f"migration: {', '.join(h['migration']) or 'none'} | decisions pending: {h.get('pending') or 'none'}")
     print(line)
     if h.get("report_to"):
@@ -308,6 +310,7 @@ def main():
             x.add_argument("--sha", required=True)
             x.add_argument("--report", help="health / test count / backup, one line")
             x.add_argument("--no-count", dest="count_batch", action="store_false", help="don't count this as a batch (several PRs in one batch: count once)")
+            x.add_argument("--no-deploy", action="store_true", help="merged and pushed only (no app change); the report says so")
         if name == "back":
             x.add_argument("--reason", required=True)
     q = sub.add_parser("queue")

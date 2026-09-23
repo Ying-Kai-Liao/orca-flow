@@ -164,7 +164,8 @@ For each PR in the batch:
 ```
 python3 scripts/handover.py done <pr> --sha <short sha> --report "<target> health ✅ | full check: N tests passed | backup: <dump or none>"
 ```
-(`--no-count` on all but one PR of a multi-PR batch, so the batch counter counts batches.) It
+(`--no-count` on all but one PR of a multi-PR batch, so the batch counter counts batches;
+`--no-deploy` when the batch was pushed but not deployed, so the report doesn't claim a deploy.) It
 prints the report line; also send it by SendMessage to the session named in the file if that
 session still exists. For a PR you didn't merge: `handover.py back <pr> --reason "..."`. Then
 `orca worktree set --worktree active --comment "<PRs> deployed <short sha>" --json`.
