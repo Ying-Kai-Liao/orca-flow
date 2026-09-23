@@ -100,6 +100,16 @@ def handover_status(common, number):
         return "?"
 
 
+def repo_queue_enabled(root):
+    """merge_queue.enabled from that repo's own config. The board spans every repo on the
+    host, so this can't use the config of the repo the skill resolved to. A config that
+    can't be read counts as having a queue: reporting an unhanded PR is the safer mistake."""
+    try:
+        return cfgmod.queue_enabled(cfgmod.load(root))
+    except (OSError, ValueError):
+        return True
+
+
 def collect(stale_min, repo_filter=None, use_gh=True, question_max_min=board_rules.QUESTION_MAX_MIN):
     """(rows, notes). Rows are already classified and sorted."""
     notes = []
@@ -114,13 +124,15 @@ def collect(stale_min, repo_filter=None, use_gh=True, question_max_min=board_rul
     by_repo = {}
     for w in worktrees:
         by_repo.setdefault(w.get("repoId"), []).append(w)
-    prs, commons = {}, {}
+    prs, commons, no_queue = {}, {}, set()
     for repo_id, wts in by_repo.items():
         repo = repos.get(repo_id) or {}
         root = repo.get("path") or wts[0].get("path")
         if repo.get("kind") == "folder" or not root or not os.path.isdir(root):
             continue
         commons[repo_id] = git_common_dir(root)
+        if not repo_queue_enabled(root):
+            no_queue.add(repo_id)
         branches = {(w.get("branch") or "").removeprefix("refs/heads/") for w in wts} - BASE_NAMES - {""}
         if use_gh and branches:
             prs[repo_id] = repo_prs(root)
@@ -146,7 +158,8 @@ def collect(stale_min, repo_filter=None, use_gh=True, question_max_min=board_rul
         # A worktree with no agent pane still gets one row: a BLOCKED card or an unhanded PR
         # matters whether or not a session is open on it.
         for ag in (w.get("agents") or [None]):
-            row = board_rules.make_row(w, ag, now_ms, pr=pr, handover=handover)
+            row = board_rules.make_row(w, ag, now_ms, pr=pr, handover=handover,
+                                       no_queue=w.get("repoId") in no_queue)
             row["attention"], row["reason"] = board_rules.classify(row, stale_min=stale_min,
                                                                    question_max_min=question_max_min)
             row["label"] = row["worktree"] or "?"

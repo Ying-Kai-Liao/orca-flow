@@ -9,7 +9,8 @@ need to know your commands simply say "not configured" instead of guessing.
 3. `<repo>/orca-flow.json`
 4. `<git-common-dir>/orca-flow/config.json` — untracked, for values you don't want in the repo
 
-Start one with `python3 scripts/config.py init`, check what resolved with
+In a repo that has never used the skill, run `python3 scripts/init.py` (below). Otherwise
+start one with `python3 scripts/config.py init`, check what resolved with
 `python3 scripts/config.py show`, and read a single value with
 `python3 scripts/config.py get worker.test_command`.
 
@@ -42,6 +43,8 @@ overrides both.
 | `worker.context_window` | `200000` | Window the context estimate is measured against (`worktrees.py context`). |
 | `worker.context_warn` | `0.35` | Fraction of the window at which a worker is flagged and the manager wraps it up and `--continue`s it. |
 | `worker.transcripts_dir` | `~/.claude/projects` | Where Claude Code writes session transcripts, if not the default (`$CLAUDE_CONFIG_DIR` is honoured). |
+| `merge_queue.enabled` | `true` | `false` for a repo with no queue session: the manager reviews and merges PRs itself, `handover.py send` refuses (unless `--force`), and `worktrees.py inventory` / `board.py` don't report open PRs as `unhanded_pr`. Only an explicit `false` turns it off. |
+| `merge_queue.merge_method` | `"squash"` | With no queue, how the manager merges: `gh pr merge <pr> --<method>` (`squash`, `merge` or `rebase`). |
 | `merge_queue.worktree_name` | `"merge-queue"` | The clean worktree the queue works from. |
 | `merge_queue.state_file` | none | A hand-written status file only the queue may edit (e.g. `NOW.md`). Workers are told to leave it alone, and the main-checkout guard allows it. |
 | `merge_queue.targets` | `[]` | Deploy targets, in order (below). |
@@ -52,6 +55,48 @@ overrides both.
 | `main_checkout.guard` | `true` | Whether the PreToolUse hook blocks edits to the main checkout. |
 | `main_checkout.allow_files` | `[]` | Files still editable there. `state_file` is added automatically. |
 | `main_checkout.allow_prefixes` | `[".claude/"]` | Path prefixes still editable there. |
+
+## First run: `init.py`
+
+```
+python3 scripts/init.py [--repo <path>] [--test-command "…"] [--full-check "…"] [--language …]
+                        [--model …] [--no-queue] [--force-config] [--dry-run] [--json]
+```
+Idempotent; one line per step, each `ok`, `skipped (already …)` or `would (dry-run)`:
+1. resolves the repo root and base branch (`origin/HEAD` if the remote has one, else the
+   current branch);
+2. registers the repo with Orca (`orca repo add`) if `orca repo list` doesn't have it;
+3. writes `<repo>/orca-flow.json` if no config file exists anywhere in the lookup order.
+   `test_command` is guessed only when there's one obvious answer (`package.json` with a
+   `test` script → `npm test`; `pyproject.toml` or `tests/` → `python3 -m unittest discover -s
+   tests`), else left null. An existing file is never touched unless `--force-config`, which
+   prints a diff and rewrites it: values already in the file win over detected defaults, flags
+   win over both, and unknown keys are kept. (So `--force-config` never turns a queue back on;
+   edit `merge_queue.enabled` by hand for that.)
+4. creates `<git-common-dir>/orca-flow/{briefs,queue,bin}`;
+5. prints `next:` with the values still null and whether the repo runs with or without a queue.
+
+Claude Code's "Quick safety check" trust is per exact directory, and every worktree is a new
+one, so `init.py` doesn't set it: `spawn_worker.py` marks each new worktree path as trusted in
+`~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` if set) before starting the agent, backing
+the file up once per run to `~/.claude.json.orca-flow.bak`.
+
+### A small repo with no queue
+
+```json
+{
+  "language": "English",
+  "base_branch": "origin/main",
+  "worker": {
+    "model": "opus",
+    "test_command": "python3 -m unittest {files}",
+    "full_check_command": "python3 -m unittest discover -s tests"
+  },
+  "merge_queue": { "enabled": false, "merge_method": "squash" }
+}
+```
+The manager hands no PRs over. For each approved PR it runs the full check from a clean
+worktree on the PR's head, then `gh pr merge <pr> --squash`.
 
 ### Deploy targets
 

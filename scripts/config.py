@@ -25,6 +25,9 @@ Usage:
   config.py get worker.model       # one value; scalars print bare, for shell use
   config.py path                   # which file was loaded (empty if none)
   config.py init [--force]         # write a starter config into <repo>/.claude/
+
+For a repo that has never run orca-flow, use scripts/init.py instead: it also registers the
+repo with Orca, detects the base branch and test command, and creates the shared directory.
 """
 import argparse
 import copy
@@ -71,6 +74,11 @@ DEFAULTS = {
         "transcripts_dir": None,
     },
     "merge_queue": {
+        # false: a small repo with no queue session. The manager reviews and merges PRs itself,
+        # handover.py send refuses, and open PRs are not reported as unhanded.
+        "enabled": True,
+        # How a manager merges when there is no queue: gh pr merge --<method> (squash, merge, rebase).
+        "merge_method": "squash",
         "worktree_name": "merge-queue",
         # A hand-written status file only the queue may edit (e.g. "NOW.md"). null = none.
         "state_file": None,
@@ -180,6 +188,12 @@ def load(root=None):
             allow.append(cfg["merge_queue"]["state_file"])
         cfg["main_checkout"]["allow_files"] = allow
     return cfg
+
+
+def queue_enabled(cfg):
+    """Whether this repo has a merge queue. Only an explicit false turns it off, so a config
+    written before the key existed keeps its queue."""
+    return (cfg.get("merge_queue") or {}).get("enabled") is not False
 
 
 def dig(cfg, dotted):
