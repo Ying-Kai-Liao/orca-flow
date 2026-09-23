@@ -10,7 +10,7 @@ It only reads: `orca worktree ps`, `orca repo list`, `gh pr list` and the handov
 files. It never writes to Orca. Polling only, since Orca has no event stream.
 
 Usage:
-  board.py [--json] [--repo <name>] [--stale-min 30] [--no-gh]
+  board.py [--json] [--repo <name>] [--stale-min 30] [--question-max-min 240] [--no-gh]
   board.py --watch [--interval 20]     # prints only rows whose attention changed, timestamped
   board.py --write                     # also writes <git-common-dir>/orca-flow/board.json of this repo
 
@@ -100,7 +100,7 @@ def handover_status(common, number):
         return "?"
 
 
-def collect(stale_min, repo_filter=None, use_gh=True):
+def collect(stale_min, repo_filter=None, use_gh=True, question_max_min=board_rules.QUESTION_MAX_MIN):
     """(rows, notes). Rows are already classified and sorted."""
     notes = []
     ps = orca("worktree", "ps", "--limit", "1000")
@@ -147,19 +147,37 @@ def collect(stale_min, repo_filter=None, use_gh=True):
         # matters whether or not a session is open on it.
         for ag in (w.get("agents") or [None]):
             row = board_rules.make_row(w, ag, now_ms, pr=pr, handover=handover)
-            row["attention"], row["reason"] = board_rules.classify(row, stale_min=stale_min)
+            row["attention"], row["reason"] = board_rules.classify(row, stale_min=stale_min,
+                                                                   question_max_min=question_max_min)
+            row["label"] = row["worktree"] or "?"
+            if len(w.get("agents") or []) > 1:
+                # Several panes in one worktree (the main checkout often has a dozen) would
+                # otherwise print as identical rows.
+                row["label"] += "@" + short_pane(row["pane"])
             rows.append(row)
     return sort_rows(rows), notes
 
 
+def short_pane(key):
+    """"<tab uuid>:<pane uuid>" -> "7004:14bf", enough to tell panes of one worktree apart."""
+    parts = (key or "").split(":")
+    return ":".join(p[:4] for p in parts if p) or "-"
+
+
 def sort_rows(rows):
-    """Grouped by repo, the repo with the most urgent row first; inside a repo by urgency,
-    then the longest in that state first."""
+    """Grouped by repo, the repo with the most urgent row first; inside a repo by urgency.
+    Questions newest first (the fresh one is the one the user hasn't seen), everything else
+    longest in that state first."""
     best = {}
     for r in rows:
         best[r["repo"]] = min(best.get(r["repo"], 99), board_rules.PRIORITY[r["attention"]])
     return sorted(rows, key=lambda r: (best[r["repo"]], str(r["repo"]), board_rules.PRIORITY[r["attention"]],
-                                       -(r["minutes_in_state"] or 0), r["worktree"] or ""))
+                                       age_key(r), r["worktree"] or ""))
+
+
+def age_key(r):
+    m = r["minutes_in_state"] or 0
+    return m if r["attention"] == "needs_human" else -m
 
 
 def fmt_min(m):
@@ -175,7 +193,7 @@ def fmt_row(r):
         # The question sits at the end of the message, not in its first line.
         msg = "…" + r["last_message_tail"].replace("\n", " ")[-80:]
     comment = f"  [{r['comment'][:50]}]" if r["comment"] else ""
-    return (f"  {r['attention']:<12} {str(r['worktree']):<28} {str(r['state'] or '-'):<8} {fmt_min(r['minutes_in_state']):>6} "
+    return (f"  {r['attention']:<12} {str(r.get('label') or r['worktree']):<28} {str(r['state'] or '-'):<8} {fmt_min(r['minutes_in_state']):>6} "
             f"PR {pr:<12} {r['reason']}{comment}" + (f"\n{'':<15}» {msg}" if msg else ""))
 
 
@@ -218,10 +236,10 @@ def changes(prev, cur):
         old = prev.get(key)
         if old is None or old["attention"] != r["attention"]:
             was = old["attention"] if old else "new"
-            lines.append(f"{r['repo']}/{r['worktree']}: {was} -> {r['attention']} ({r['reason']})")
+            lines.append(f"{r['repo']}/{r.get('label') or r['worktree']}: {was} -> {r['attention']} ({r['reason']})")
     for key, old in prev.items():
         if key not in cur:
-            lines.append(f"{old['repo']}/{old['worktree']}: {old['attention']} -> gone")
+            lines.append(f"{old['repo']}/{old.get('label') or old['worktree']}: {old['attention']} -> gone")
     return lines
 
 
@@ -232,7 +250,7 @@ def watch(a):
     try:
         while True:
             try:
-                rows, notes = collect(a.stale_min, a.repo, use_gh=not a.no_gh)
+                rows, notes = collect(a.stale_min, a.repo, use_gh=not a.no_gh, question_max_min=a.question_max_min)
             except OrcaError as e:
                 print(f"{stamp()} ! {e}", flush=True)
                 time.sleep(a.interval)
@@ -263,6 +281,8 @@ def main():
     p.add_argument("--repo", help="only this Orca repo (its display name)")
     p.add_argument("--stale-min", type=float, default=board_rules.STALE_MIN,
                    help="a working pane with no update for longer than this is stale (default 30)")
+    p.add_argument("--question-max-min", type=float, default=board_rules.QUESTION_MAX_MIN,
+                   help="a question in an agent's message older than this is demoted to done (default 240)")
     p.add_argument("--watch", action="store_true")
     p.add_argument("--interval", type=float, default=20)
     p.add_argument("--write", action="store_true", help="also write <git-common-dir>/orca-flow/board.json")
@@ -275,7 +295,7 @@ def main():
         watch(a)
         return
     try:
-        rows, notes = collect(a.stale_min, a.repo, use_gh=not a.no_gh)
+        rows, notes = collect(a.stale_min, a.repo, use_gh=not a.no_gh, question_max_min=a.question_max_min)
     except OrcaError as e:
         die(str(e))
     if a.write:

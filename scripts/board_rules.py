@@ -27,16 +27,28 @@ IDLE_STATES = {"idle", None, ""}
 
 # Phrases that ask the user to decide, matched only in the last paragraph and only as
 # requests. Deliberately narrow: the merge queue and workers end with status reports, and a
-# report that ends with a period must stay done/working, not needs_human. A bare "confirm"
-# is not here because "I confirmed ..." and "confirm the timer didn't start" (an instruction
-# to check something) are both common in reports.
+# report must stay done/working, not needs_human. So a last paragraph that ends with a period
+# is never a request, whatever it mentions ("Per the 2026-09-23 拍板, no per-batch approval."),
+# and a phrase right after a negation ("不需要你拍板", "no need to confirm") doesn't count. A bare
+# "confirm" is not listed because "I confirmed ..." is common in reports.
 DECISION_PHRASES = (
     "拍板", "請確認", "需要你決定", "你決定",
     "should i ", "which do you want", "which one do you want", "do you want me to",
     "please confirm", "can you confirm", "could you confirm", "your call", "let me know which",
 )
-# Trailing markup that can sit after the real last character: bold, code, quotes, brackets.
-_TRAILING = re.compile(r"[\s*_`'\"」』）)\]]+$")
+NEGATIONS = ("不需要", "不用", "不必", "無需", "毋需", "no need", "not need", "don't need", "doesn't need")
+NEGATION_WINDOW = 12  # chars before a phrase in which a negation cancels it
+# A question longer ago than this with no answer is treated as done: the user saw it or moved
+# on, and a board full of day-old questions hides the new ones.
+QUESTION_MAX_MIN = 240
+# The handover file exists but the queue sent the PR back: it needs handing over again.
+NOT_HANDED = {"returned"}
+
+# Trailing markup that can sit after the real last character: bold, code, quotes.
+_TRAILING = re.compile(r"[\s*_`'\"」』]+$")
+# A trailing parenthetical: "Done. (Tests pass?)" is a report with an aside, not a question.
+_TRAILING_BRACKETS = re.compile(r"\s*[(（\[【][^()（）\[\]【】]*[)）\]】]$")
+_FENCE = re.compile(r"```.*?(```|$)", re.S)
 
 
 def _last_paragraph(text):
@@ -44,28 +56,51 @@ def _last_paragraph(text):
     return parts[-1] if parts else ""
 
 
+def _strip_end(text):
+    """Text without trailing markup and trailing bracketed asides, so its real last
+    character can be read."""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _TRAILING_BRACKETS.sub("", _TRAILING.sub("", text))
+    return text
+
+
+def _negated(text, i):
+    before = text[max(0, i - NEGATION_WINDOW):i]
+    return any(n in before for n in NEGATIONS)
+
+
 def asks_user(message):
     """(True, why) when the last assistant message puts a question or a decision to the user."""
-    text = (message or "").strip()
+    # Code blocks are quoted material (a script, a log line with a "?"), not what the agent says.
+    text = _FENCE.sub("", message or "").strip()
     if not text:
         return False, ""
-    tail = _TRAILING.sub("", text)
+    tail = _strip_end(text)
     if tail.endswith(("?", "？")):
         return True, "last message ends with a question"
-    last = _last_paragraph(text).lower()
+    last = _strip_end(_last_paragraph(text))
+    if last.endswith((".", "。")):
+        return False, ""
+    low = last.lower()
     for phrase in DECISION_PHRASES:
-        if phrase in last:
-            return True, f"last message asks for a decision ({phrase.strip()!r})"
+        i = low.find(phrase)
+        while i >= 0:
+            if not _negated(low, i):
+                return True, f"last message asks for a decision ({phrase.strip()!r})"
+            i = low.find(phrase, i + 1)
     return False, ""
 
 
-def classify(row, stale_min=STALE_MIN):
+def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN):
     """(attention, reason) for one agent pane row. Exactly one attention value from ATTENTION.
 
     Order matters, first match wins:
     1. Orca says the agent is waiting on the user.
     2. The card says BLOCKED, then HANDOFF: the worker has already said what it needs.
-    3. The agent stopped and its last message asks something (prose questions look like done).
+    3. The agent stopped and its last message asks something (prose questions look like done),
+       unless it has sat unanswered for longer than question_max_min: then it is done.
     4. An open, non-draft PR nobody handed to the queue, with no agent still working on it.
     5. Working, but no update for longer than stale_min.
     6. Plain working / done / idle; anything else is unknown.
@@ -81,11 +116,15 @@ def classify(row, stale_min=STALE_MIN):
     if state not in WORKING_STATES:
         asks, why = asks_user(row.get("last_message_tail") or row.get("last_message"))
         if asks:
+            mins = row.get("minutes_in_state")
+            if mins is not None and mins > question_max_min:
+                return "done", f"asked {mins / 60:.0f}h ago, no answer; demoted"
             return "needs_human", why
     pr = row.get("pr") or {}
     if (pr.get("number") and (pr.get("state") or "").upper() == "OPEN" and pr.get("isDraft") is not True
-            and not row.get("handover") and state not in WORKING_STATES):
-        return "unhanded_pr", f"PR #{pr['number']} is open with no handover file"
+            and (not row.get("handover") or row.get("handover") in NOT_HANDED) and state not in WORKING_STATES):
+        why = "was sent back by the queue" if row.get("handover") in NOT_HANDED else "has no handover file"
+        return "unhanded_pr", f"PR #{pr['number']} is open and {why}"
     if state in WORKING_STATES:
         mins = row.get("minutes_since_update")
         if mins is not None and mins > stale_min:

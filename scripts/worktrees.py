@@ -135,12 +135,11 @@ def collect(fetch):
         # Not lastOutputAt: a terminal sitting at a shell prompt repaints all the time.
         last = max([w.get("lastActivityAt") or 0] + [ag.get("updatedAt") or 0 for ag in agents])
         pr = prs.get(branch) or (by_head.get(head) if head else None)
-        # One rule set with board.py. Only panes Orca itself reports as waiting are listed:
-        # classify also flags stopped agents whose last message asks a question, but listing
-        # those here would change inventory's output. NEEDS DECISION: whether inventory should
-        # show those prose questions too (board.py already does).
+        # One rule set with board.py. Only panes Orca itself reports as waiting (or at a
+        # permission prompt) are listed; questions inferred from the message text are
+        # board.py's job, where they can be demoted when old.
         waiting = [(ag.get("lastAssistantMessage") or "").strip() for ag in agents
-                   if ag.get("state") == "waiting"
+                   if ag.get("state") in board_rules.WAITING_STATES
                    and board_rules.classify(board_rules.make_row(p, ag, now_ms))[0] == "needs_human"]
         ctx = None
         if exists:
@@ -302,7 +301,7 @@ def unhanded_prs(repo_root):
         if os.path.isfile(f):
             try:
                 with open(f, encoding="utf-8") as fh:
-                    status = json.load(fh).get("status")
+                    status = json.load(fh).get("status") or "?"
             except (ValueError, OSError):
                 status = "?"
         rows.append({"number": pr["number"], "title": pr["title"], "branch": pr["headRefName"],
@@ -414,8 +413,9 @@ def main():
             if missing:
                 print("\nOpen PRs with no handover file (the queue doesn't know about these):")
                 for u in missing:
-                    print(f"  #{u['number']} {u['branch']}  {u['title'][:60]}  (updated {u['updated'][:10]})")
-            done = [u for u in unhanded if u["handover"]]
+                    back = "  [sent back by the queue]" if u["handover"] else ""
+                    print(f"  #{u['number']} {u['branch']}  {u['title'][:60]}  (updated {u['updated'][:10]}){back}")
+            done = [u for u in unhanded if u["handover"] and u not in missing]
             if done:
                 print("\nOpen PRs already handed over: " + ", ".join(f"#{u['number']} ({u['handover']})" for u in done))
         return
