@@ -24,8 +24,11 @@ references/merge-queue.md     merging, verifying and deploying a batch
 references/configuration.md   every config key
 assets/common.md              worker rules, rendered per project
 assets/brief-template.md      what a brief has to contain
-scripts/spawn_worker.py       create worktree → start agent → wait for its TUI → send the brief once
-scripts/worktrees.py          inventory · status · overlap · cleanup
+scripts/spawn_worker.py       create worktree → start agent → wait for its TUI → send the brief once; --continue restarts a worker from its transcript
+scripts/worktrees.py          inventory · status · context · handoff · overlap · cleanup
+scripts/handover.py           hand a PR to the queue as a file; the queue takes / finishes / returns it; queue rotation
+scripts/transcript.py         read a session's transcript: context estimate, handoff digest
+scripts/archive_status.py     move old status-file entries into an archive
 scripts/test-lock.sh          flock-based queue so N test runs share the machine
 scripts/main_checkout_guard.py PreToolUse hook keeping the main checkout on its base branch
 scripts/config.py             config loader (show / get / init)
@@ -108,6 +111,19 @@ python3 scripts/worktrees.py status csv-export          # in-review / blocked / 
 # will these two packages collide?
 python3 scripts/worktrees.py overlap src/admin.js sql/
 
+# how full is each worker's context, from its transcript on disk
+python3 scripts/worktrees.py context
+# a worker is over the line: tell it to wrap up, then restart it in the same worktree
+python3 scripts/spawn_worker.py --name csv-export --continue --note "finish the export route first"
+
+# hand a reviewed PR to the merge queue (the head comes from gh, never typed)
+python3 scripts/handover.py send 42 --pending none --verified "lint ✅ csv.test.ts" --report-to my-session
+python3 scripts/handover.py status 42
+# the queue's side
+python3 scripts/handover.py queue start --session merge-queue-1
+python3 scripts/handover.py list --check
+python3 scripts/handover.py done 42 --sha abc1234 --report "staging health ✅ | 812 tests"
+
 # what can be cleaned up (removes nothing until you name names)
 python3 scripts/worktrees.py cleanup
 python3 scripts/worktrees.py cleanup --apply csv-export,old-spike
@@ -138,6 +154,14 @@ Most of the rules here are scar tissue, and the scripts say so in their comments
 - **Judge a worktree by its PR, not by its branch.** A worktree sitting on the base branch with an
   open PR is waiting for review, not idle.
 - **Ask before removing anything.** "Show me what's idle" is a request to look.
+- **Sessions fill up; plan for it.** A worker's state is its branch plus a handoff file, the
+  queue's is the handover files plus the status file. The manager reads each worker's context
+  from its transcript on disk (`worktrees.py context`) and restarts it with `--continue`; the
+  queue retires after a fixed number of batches. Nobody depends on a session being long-lived.
+- **Handovers are files.** Session names change, sessions get restarted, and a chat message to
+  the wrong one is silently lost. `queue/<pr>.json` is read by whichever session is the queue.
+- **Don't read big files whole.** One 7,000-line file is half a context. Briefs carry entry
+  points with line ranges; the status file is read from the top and archived past N entries.
 
 ## License
 

@@ -31,7 +31,9 @@
     "Looks for an already-running merge/deploy session by activity (ListAgents, orca worktree ps comments or agent prompts, or terminal titles), not only a worktree named merge-queue",
     "If a merge/deploy session is running at run time, hands #80 to it and plans no second queue; creating a queue appears only as a fallback for when none is found",
     "The handoff message includes PR #80's reviewed head commit SHA (or the exact gh command that fills it in) so the queue merges only what was reviewed",
-    "The handoff states the migration status and whom to report back to"
+    "The handoff states the migration status and whom to report back to",
+    "Hands the PR over with handover.py send (a queue/<pr>.json file whose head comes from gh pr view), not by typing a SHA into a chat line; a chat message is at most an extra",
+    "Checks handover.py queue show (or the older three sources) for a registered queue before starting one"
    ]
   },
   {
@@ -52,7 +54,9 @@
     "Uses the deploy commands from the project's config rather than invented ones, in the configured order, and confirms any CI run it watches is for the pushed commit",
     "Runs the configured backup step and verifies the backup is non-empty before deploying the target that has one",
     "Checks every configured health URL and compares the reported commit with what was deployed",
-    "Updates the configured status file and reports back to the managers with commit, test count and deploy status"
+    "Updates the configured status file and reports back to the managers with commit, test count and deploy status",
+    "Reads pending work from handover.py list, takes each PR before merging it, and closes each with handover.py done / back so managers can poll the file",
+    "Runs no end-to-end verification beyond the health check and the handover's after-deploy check unless the handover asked for it"
    ]
   },
   {
@@ -67,7 +71,23 @@
     "Finds concrete things that really can be cleaned (for example finished Setup tabs or never-used shells), gives the exact close or remove command for each, and marks every close or remove step as needing the user's OK; none is planned to run unasked",
     "Tells agent sessions waiting for the user's answer apart from truly idle ones, and doesn't propose closing the waiting ones",
     "If a terminal shows secret values: names the terminal, copies no value into any output, and recommends closing it and rotating the keys",
-    "Nothing is actually removed or closed; removal commands appear only in the plan or as dry-run output"
+    "Nothing is actually removed or closed; removal commands appear only in the plan or as dry-run output",
+    "Treats a clean worktree whose HEAD is already an ancestor of the base branch (renamed branch or detached HEAD after merge) as merged, even when no PR matches its branch name",
+    "Does not call a worktree active merely because its terminal repainted; idleness comes from the worktree's and agents' own activity times"
+   ]
+  },
+  {
+   "id": 5,
+   "name": "worker-over-context-budget",
+   "prompt": "The csv-export worker has been going for two hours. Is it close to running out of context? If so, do whatever the flow says.",
+   "expected_output": "Runs worktrees.py context (or inventory) and reads the estimate from the worker's transcript rather than asking the worker. If flagged, sends the WRAP UP line, waits for the card to say HANDOFF (or the agent to go idle), then spawn_worker.py --name csv-export --continue with a note. Doesn't start a second worktree and doesn't let the worker spawn its own sibling.",
+   "files": [],
+   "expectations": [
+    "Measures the worker's context with worktrees.py context or the ctx column of inventory, not by asking the worker or reading its terminal",
+    "If the worker is over worker.context_warn, sends it a single WRAP UP line (commit WIP, push, write handoff.md, set card to HANDOFF)",
+    "Waits for the HANDOFF card or an idle agent before restarting; never sends the wrap-up line twice",
+    "Restarts with spawn_worker.py --continue in the same worktree, which writes handoff-digest.md from the old transcript; plans no new worktree and no worker-spawned sibling",
+    "If the worker is under the line, says so with the number and does nothing else"
    ]
   }
  ]

@@ -27,3 +27,5 @@ so the background has to be here.>
 - Screenshots / designs: <filename in the brief folder, e.g. ./current.png>
 - Spec: <docs/…>
 - Relevant code: <entry points>
+- Entry points in big files, with line ranges: <`path:120-210 functionName` — the worker
+  must not read these files whole; give it the ranges and the names to grep>

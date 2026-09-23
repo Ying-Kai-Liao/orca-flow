@@ -10,6 +10,10 @@
     "full_check_command": "bash scripts/check.sh",
     "migrations_dir": "sql",
     "run_command": "npm run dev",
+    "big_files": ["public/app.js", "public/app.css", "src/api/catalog.ts"],
+    "big_file_lines": 1500,
+    "context_window": 200000,
+    "context_warn": 0.35,
     "extra_rules": [
       "Migrations must run on both the in-process database used by tests and the real one used in production.",
       "The employee-facing bundle is one big file several packages touch; stay inside your own section of it."
@@ -18,6 +22,8 @@
   "merge_queue": {
     "worktree_name": "merge-queue",
     "state_file": "NOW.md",
+    "state_file_keep": 10,
+    "rotate_after": 10,
     "targets": [
       {
         "name": "staging",
