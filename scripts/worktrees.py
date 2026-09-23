@@ -33,6 +33,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import board_rules  # noqa: E402
 import config as cfgmod  # noqa: E402
 import transcript  # noqa: E402
 
@@ -134,7 +135,13 @@ def collect(fetch):
         # Not lastOutputAt: a terminal sitting at a shell prompt repaints all the time.
         last = max([w.get("lastActivityAt") or 0] + [ag.get("updatedAt") or 0 for ag in agents])
         pr = prs.get(branch) or (by_head.get(head) if head else None)
-        waiting = [ (ag.get("lastAssistantMessage") or "").strip() for ag in agents if ag.get("state") == "waiting" ]
+        # One rule set with board.py. Only panes Orca itself reports as waiting are listed:
+        # classify also flags stopped agents whose last message asks a question, but listing
+        # those here would change inventory's output. NEEDS DECISION: whether inventory should
+        # show those prose questions too (board.py already does).
+        waiting = [(ag.get("lastAssistantMessage") or "").strip() for ag in agents
+                   if ag.get("state") == "waiting"
+                   and board_rules.classify(board_rules.make_row(p, ag, now_ms))[0] == "needs_human"]
         ctx = None
         if exists:
             f = transcript.latest_transcript(path, TRANSCRIPTS)
@@ -303,6 +310,13 @@ def unhanded_prs(repo_root):
     return rows
 
 
+def pr_row(u):
+    """An unhanded_prs() entry as a board row with no agent pane, so classify decides it.
+    unhanded_prs() already dropped drafts; the list only holds open PRs."""
+    return {"pr": {"number": u["number"], "state": "OPEN", "isDraft": False}, "handover": u["handover"],
+            "state": None, "comment": ""}
+
+
 def cmd_context(rows, name):
     for r in sorted(rows, key=lambda r: -(r["ctx"] or {}).get("pct", -1)):
         if name and r["name"] != name:
@@ -396,7 +410,7 @@ def main():
         if unhanded is None:
             print("\n! gh pr list failed; open PRs not checked")
         else:
-            missing = [u for u in unhanded if u["handover"] is None]
+            missing = [u for u in unhanded if board_rules.classify(pr_row(u))[0] == "unhanded_pr"]
             if missing:
                 print("\nOpen PRs with no handover file (the queue doesn't know about these):")
                 for u in missing:
