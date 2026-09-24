@@ -219,20 +219,19 @@ def render_handoff(cfg):
         "A fresh session continues from the brief plus your `handoff.md`. " + fresh)
 
 
-def bump_continues(brief_dir, dry):
-    """How many times this package has been continued, counting this one. Kept in
-    continues.txt next to the brief, so it survives manager sessions."""
-    path = os.path.join(brief_dir, "continues.txt")
+def read_continues(brief_dir):
+    """How many times this package has been continued so far. Kept in continues.txt next to
+    the brief, so it survives manager sessions."""
     try:
-        with open(path, encoding="utf-8") as f:
-            n = int(f.read().strip() or 0)
+        with open(os.path.join(brief_dir, "continues.txt"), encoding="utf-8") as f:
+            return int(f.read().strip() or 0)
     except (OSError, ValueError):
-        n = 0
-    n += 1
-    if not dry:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"{n}\n")
-    return n
+        return 0
+
+
+def write_continues(brief_dir, n):
+    with open(os.path.join(brief_dir, "continues.txt"), "w", encoding="utf-8") as f:
+        f.write(f"{n}\n")
 
 
 def write_manager(brief_dir, session):
@@ -405,7 +404,8 @@ def continue_worker(a, cfg, wt, brief_dir, brief_path, common_path, test_lock, a
     digest_path = os.path.join(brief_dir, "handoff-digest.md")
     handoff_path = os.path.join(brief_dir, "handoff.md")
     has_own = os.path.isfile(handoff_path)
-    count = bump_continues(brief_dir, dry)
+    # Counted only once the prompt is sent (below): a continue that fails to start isn't one.
+    count = read_continues(brief_dir) + 1
     limit = ho.get("max_continues")
     warning = (f"this package has now been continued {count} times (handoff.max_continues is {limit}): "
                f"it is too big for one worker; split what's left into new packages"
@@ -450,6 +450,7 @@ def continue_worker(a, cfg, wt, brief_dir, brief_path, common_path, test_lock, a
     orca("worktree", "set", "--worktree", f"id:{wt.get('id')}", "--comment", f"continued: {brief_title(brief_path)}", "--workspace-status", "in-progress", context=base_info)
     base_info["trust"] = ensure_trusted(path) if path else "skipped trust: the worktree has no path"
     start_agent(wt.get("id"), agent_cmd, prompt, base_info, title="worker (cont.)")
+    write_continues(brief_dir, count)
 
 
 def main():

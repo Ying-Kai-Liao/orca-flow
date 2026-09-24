@@ -389,6 +389,14 @@ class RepoQueueEnabledTest(unittest.TestCase):
                          (True, 10, 240, ["sign it off"]))
 
 
+class RepoSettingsNullTest(RepoQueueEnabledTest):
+    def test_null_board_values_fall_back_to_defaults(self):
+        import board
+        self.write("orca-flow.json", '{"board": {"stale_min": null, "question_max_min": null, "negations": null}}')
+        st = board.repo_settings(self.root)
+        self.assertEqual((st["stale_min"], st["question_max_min"], st["negations"]), (30, 240, []))
+
+
 class WatchDiffTest(unittest.TestCase):
     def test_only_changed_new_and_gone_rows(self):
         import board

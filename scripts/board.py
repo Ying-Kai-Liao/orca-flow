@@ -111,7 +111,10 @@ def repo_settings(root):
     except (OSError, ValueError):
         raw = {}
     raw = raw if isinstance(raw, dict) else {}
-    board = cfgmod.merge(cfgmod.DEFAULTS["board"], raw.get("board") if isinstance(raw.get("board"), dict) else {})
+    own = raw.get("board") if isinstance(raw.get("board"), dict) else {}
+    # null in the file (config.py set board.stale_min null) means "not set": use the default,
+    # since classify compares against these numbers.
+    board = {k: own[k] if own.get(k) is not None else d for k, d in cfgmod.DEFAULTS["board"].items()}
     return {"no_queue": not cfgmod.queue_enabled(raw), **board}
 
 

@@ -436,8 +436,12 @@ def type_errors(raw):
 
     walk(raw, "")
     w = raw.get("worker") or {}
-    if isinstance(w.get("context_warn"), (int, float)) and w["context_warn"] <= 0:
-        errors.append(("worker.context_warn", "must be above 0"))
+    cw = w.get("context_warn")
+    if isinstance(cw, (int, float)) and not isinstance(cw, bool):
+        if cw <= 0:
+            errors.append(("worker.context_warn", "must be above 0"))
+        elif cw > 1 and cw != int(cw):
+            errors.append(("worker.context_warn", "a fraction (<= 1) or a whole token count (> 1), not " + str(cw)))
     for i, t in enumerate((raw.get("merge_queue") or {}).get("targets") or []):
         if not isinstance(t, dict) or not t.get("name") or not isinstance(t.get("deploy"), list):
             errors.append((f"merge_queue.targets[{i}]", 'needs a "name" and a "deploy" list'))
@@ -469,13 +473,25 @@ def write_target(root, local):
     return config_path(root) or os.path.join(root, "orca-flow.json")
 
 
+def dump_json(data):
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
 def write_json(path, data):
+    # Write through a symlink to its target, so a linked config stays a link.
+    path = os.path.realpath(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp-{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(dump_json(data))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def cmd_set(a, root, delete=False):
@@ -488,6 +504,7 @@ def cmd_set(a, root, delete=False):
     target = write_target(root, a.local)
     try:
         data = read_json(target) if os.path.isfile(target) else {}
+        before = dump_json(data) if os.path.isfile(target) else ""
     except ValueError as e:
         sys.exit(f"{target} is not valid JSON ({e}); fix it by hand first")
     if delete:
@@ -505,7 +522,9 @@ def cmd_set(a, root, delete=False):
                 sys.exit(f"--append works on list keys; {a.key} is {_type_name(SCHEMA[a.key][0])}")
             current = dig(data, a.key)
             if current is None:
-                current = list(dig(load(root), a.key) or [])
+                # Seed from the defaults, not load(): that includes the other file, and a
+                # --local value must not leak into the committed file (or the reverse).
+                current = list(dig(DEFAULTS, a.key) or [])
             if not isinstance(current, list):
                 sys.exit(f"{a.key} in {target} is not a list")
             value = current + [a.value]
@@ -516,6 +535,8 @@ def cmd_set(a, root, delete=False):
         verb = f"set {a.key} = {json.dumps(value, ensure_ascii=False)}"
     if a.dry_run or os.environ.get("ORCA_FLOW_DRY_RUN") == "1":
         print(f"would {verb} in {target}")
+        sys.stdout.writelines(difflib.unified_diff(before.splitlines(True), dump_json(data).splitlines(True),
+                                                   fromfile=target, tofile=target + " (after)"))
         return
     write_json(target, data)
     print(f"{verb} in {target}")

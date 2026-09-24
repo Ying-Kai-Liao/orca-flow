@@ -109,10 +109,30 @@ class SetTest(ConfigTestBase):
         self.assertFalse(os.path.exists(os.path.join(self.root, "orca-flow.json")))
         self.assertEqual(self.cli("set", "my.note", "hello", "--force")[0], 0)
 
+    def test_append_does_not_copy_the_other_file(self):
+        self.write(os.path.join(self.root, "orca-flow.json"), {})
+        self.cli("set", "worker.checks", '["local-only"]', "--local")
+        self.cli("set", "worker.checks", "npm run lint", "--append")
+        self.assertEqual(self.read(os.path.join(self.root, "orca-flow.json"))["worker"]["checks"], ["npm run lint"])
+
+    def test_context_warn_fractional_tokens_rejected(self):
+        self.assertNotEqual(self.cli("set", "worker.context_warn", "1.5")[0], 0)
+        self.assertEqual(self.cli("set", "worker.context_warn", "90000")[0], 0)
+
+    def test_symlinked_config_stays_a_link(self):
+        real = os.path.join(self.tmp.name, "shared.json")
+        self.write(real, {})
+        link = os.path.join(self.root, "orca-flow.json")
+        os.symlink(real, link)
+        self.cli("set", "board.stale_min", "45")
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(self.read(real), {"board": {"stale_min": 45}})
+
     def test_dry_run_writes_nothing(self):
         code, out = self.cli("set", "handoff.enabled", "false", "--dry-run")
         self.assertEqual(code, 0)
         self.assertIn("would set handoff.enabled = false", out)
+        self.assertIn('+    "enabled": false', out)
         self.assertFalse(os.path.exists(os.path.join(self.root, "orca-flow.json")))
 
 
@@ -162,9 +182,9 @@ class SettingsTest(ConfigTestBase):
     def test_continue_counter(self):
         d = os.path.join(self.tmp.name, "brief")
         os.makedirs(d)
-        self.assertEqual(spawn_worker.bump_continues(d, dry=True), 1)
-        self.assertEqual(spawn_worker.bump_continues(d, dry=False), 1)
-        self.assertEqual(spawn_worker.bump_continues(d, dry=False), 2)
+        self.assertEqual(spawn_worker.read_continues(d), 0)
+        spawn_worker.write_continues(d, 2)
+        self.assertEqual(spawn_worker.read_continues(d), 2)
 
 
 if __name__ == "__main__":
