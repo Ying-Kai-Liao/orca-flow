@@ -28,15 +28,16 @@ IDLE_STATES = {"idle", None, ""}
 # Phrases that ask the user to decide, matched only in the last paragraph and only as
 # requests. Deliberately narrow: the merge queue and workers end with status reports, and a
 # report must stay done/working, not needs_human. So a last paragraph that ends with a period
-# is never a request, whatever it mentions ("Per the 2026-09-23 拍板, no per-batch approval."),
-# and a phrase right after a negation ("不需要你拍板", "no need to confirm") doesn't count. A bare
-# "confirm" is not listed because "I confirmed ..." is common in reports.
+# is never a request, whatever it mentions ("Per the sign-off, no per-batch approval."), and
+# a phrase right after a negation ("no need to confirm") doesn't count. A bare "confirm" is
+# not listed because "I confirmed ..." is common in reports. These are English; a repo whose
+# agents write in another language adds its own with board.decision_phrases / board.negations.
 DECISION_PHRASES = (
-    "拍板", "請確認", "需要你決定", "你決定",
     "should i ", "which do you want", "which one do you want", "do you want me to",
     "please confirm", "can you confirm", "could you confirm", "your call", "let me know which",
+    "need you to decide", "please decide",
 )
-NEGATIONS = ("不需要", "不用", "不必", "無需", "毋需", "no need", "not need", "don't need", "doesn't need")
+NEGATIONS = ("no need", "not need", "don't need", "doesn't need")
 NEGATION_WINDOW = 12  # chars before a phrase in which a negation cancels it
 # A question longer ago than this with no answer is treated as done: the user saw it or moved
 # on, and a board full of day-old questions hides the new ones.
@@ -45,9 +46,13 @@ QUESTION_MAX_MIN = 240
 NOT_HANDED = {"returned"}
 
 # Trailing markup that can sit after the real last character: bold, code, quotes.
-_TRAILING = re.compile(r"[\s*_`'\"」』]+$")
+_TRAILING = re.compile("[\\s*_`'\"\u300d\u300f]+$")  # also CJK closing quotes
 # A trailing parenthetical: "Done. (Tests pass?)" is a report with an aside, not a question.
-_TRAILING_BRACKETS = re.compile(r"\s*[(（\[【][^()（）\[\]【】]*[)）\]】]$")
+_TRAILING_BRACKETS = re.compile(
+    "\\s*[(\uff08\\[\u3010][^()\uff08\uff09\\[\\]\u3010\u3011]*[)\uff09\\]\u3011]$")  # also full-width brackets
+# Full-width forms end sentences in CJK text; they count the same as ? and .
+QUESTION_ENDS = ("?", "\uff1f")
+SENTENCE_ENDS = (".", "\u3002")
 _FENCE = re.compile(r"```.*?(```|$)", re.S)
 
 
@@ -66,34 +71,38 @@ def _strip_end(text):
     return text
 
 
-def _negated(text, i):
+def _negated(text, i, negations=NEGATIONS):
     before = text[max(0, i - NEGATION_WINDOW):i]
-    return any(n in before for n in NEGATIONS)
+    return any(n in before for n in negations)
 
 
-def asks_user(message):
-    """(True, why) when the last assistant message puts a question or a decision to the user."""
+def asks_user(message, phrases=(), negations=()):
+    """(True, why) when the last assistant message puts a question or a decision to the user.
+    phrases / negations are added to the built-in English ones (board.decision_phrases,
+    board.negations in the config)."""
+    phrases = DECISION_PHRASES + tuple(p.lower() for p in phrases or ())
+    negations = NEGATIONS + tuple(n.lower() for n in negations or ())
     # Code blocks are quoted material (a script, a log line with a "?"), not what the agent says.
     text = _FENCE.sub("", message or "").strip()
     if not text:
         return False, ""
     tail = _strip_end(text)
-    if tail.endswith(("?", "？")):
+    if tail.endswith(QUESTION_ENDS):
         return True, "last message ends with a question"
     last = _strip_end(_last_paragraph(text))
-    if last.endswith((".", "。")):
+    if last.endswith(SENTENCE_ENDS):
         return False, ""
     low = last.lower()
-    for phrase in DECISION_PHRASES:
+    for phrase in phrases:
         i = low.find(phrase)
         while i >= 0:
-            if not _negated(low, i):
+            if not _negated(low, i, negations):
                 return True, f"last message asks for a decision ({phrase.strip()!r})"
             i = low.find(phrase, i + 1)
     return False, ""
 
 
-def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN):
+def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN, phrases=(), negations=()):
     """(attention, reason) for one agent pane row. Exactly one attention value from ATTENTION.
 
     Order matters, first match wins:
@@ -115,7 +124,7 @@ def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN):
     if comment.startswith("HANDOFF"):
         return "handoff", "card comment starts with HANDOFF"
     if state not in WORKING_STATES:
-        asks, why = asks_user(row.get("last_message_tail") or row.get("last_message"))
+        asks, why = asks_user(row.get("last_message_tail") or row.get("last_message"), phrases, negations)
         if asks:
             mins = row.get("minutes_in_state")
             if mins is not None and mins > question_max_min:

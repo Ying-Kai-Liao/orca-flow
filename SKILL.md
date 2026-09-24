@@ -1,6 +1,6 @@
 ---
 name: orca-flow
-description: Run a repo's changes through Orca worktrees. A manager session writes briefs and starts workers in new worktrees. Workers open PRs. One merge-queue session merges, runs the full check and deploys. Use when the user wants work done in a worktree or in parallel ("fix X in a worktree", 開 worktree 修, 開 worker, parallel workers), hands over several tasks at once, says "merge and deploy" or 合併部署, asks what the workers are doing, or wants idle worktrees cleaned up. Also use it before changing code in the repo's main checkout. Workers started by this flow follow the common.md next to their brief instead. Not for Orca browser automation or general Orca CLI questions; use orca-cli for those.
+description: Run a repo's changes through Orca worktrees. A manager session writes briefs and starts workers in new worktrees. Workers open PRs. One merge-queue session merges, runs the full check and deploys. Use when the user wants work done in a worktree or in parallel ("fix X in a worktree", "start a worker", parallel workers), hands over several tasks at once, says "merge and deploy", asks what the workers are doing, wants idle worktrees cleaned up, or wants to change the flow's settings (handoff on/off, context limit, test commands, board thresholds). Also use it before changing code in the repo's main checkout. Workers started by this flow follow the common.md next to their brief instead. Not for Orca browser automation or general Orca CLI questions; use orca-cli for those.
 ---
 
 # Orca flow
@@ -21,11 +21,27 @@ except for the configured allow list. If it blocks you, move the work into a wor
 route around it with Bash (`sed -i`, heredocs).
 
 **Project settings** live in an `orca-flow.json` (see `references/configuration.md`). It says
-how this project is tested, checked and deployed. Read it before you claim any of that:
+how this project is tested, checked and deployed, and how the flow itself behaves (handoff,
+context limit, board thresholds, cleanup). Read it before you claim any of that:
 ```
-python3 scripts/config.py show
+python3 scripts/config.py show                  # everything, resolved
+python3 scripts/config.py keys                  # every key: value, default, what it does
 ```
 If a value isn't configured, it isn't known — find out or ask, rather than assuming a command.
+
+**Changing a setting** (the user asks to turn handoff off, raise the context limit, add a
+check, …): use `config.py set`, never a hand edit of the JSON, and run `check` after.
+```
+python3 scripts/config.py set <key> <value> [--local] [--dry-run]   # e.g. set handoff.enabled false
+python3 scripts/config.py set worker.checks "npm run lint" --append  # add one item to a list
+python3 scripts/config.py unset <key> [--local]                     # back to the default
+python3 scripts/config.py check
+```
+It writes the config file already in use (or `<repo>/orca-flow.json`). `--local` writes
+`<git-common-dir>/orca-flow/config.json` instead: never committed, laid over the repo's file,
+so use it for personal preferences (model, context limit, bypass) or values that mustn't be
+committed. Tell the user which file changed. Changes reach workers started afterwards;
+running workers keep the rules they were started with.
 
 **Paths:**
 - **Scripts** live in this skill's `scripts/`; run them by absolute path. Anything that changes
@@ -38,7 +54,9 @@ routine, not an emergency: a worker's state is its branch plus a handoff file, t
 state is the handover files plus the status file, and both can be restarted from those with
 nothing to catch up on. `worktrees.py context` estimates each worker session's context from
 its transcript on disk (no cooperation from the worker needed) and flags the ones over
-`worker.context_warn`. The queue retires itself after `merge_queue.rotate_after` batches.
+`worker.context_warn` (a fraction of `worker.context_window`, or a token count). The queue
+retires itself after `merge_queue.rotate_after` batches. With `handoff.enabled: false` the
+manager never wraps a worker up; flagged workers keep going on the agent's own compaction.
 Reads are what fill a context: workers don't read big files whole, and nobody reads the
 whole status file.
 
@@ -55,7 +73,7 @@ python3 scripts/init.py [--test-command "…"] [--full-check "…"] [--no-queue]
 ```
 It registers the repo with Orca, writes `orca-flow.json` (never over an existing one), creates
 `<git-common-dir>/orca-flow/`, and ends with a `next:` line naming the config values still
-null. Fill those by hand before starting workers. It's safe to rerun. Workers' Claude Code
+null. Fill those with `config.py set` before starting workers. It's safe to rerun. Workers' Claude Code
 trust is set per worktree path by `spawn_worker.py`, so the safety-check dialog doesn't stop them.
 
 **No queue** (`merge_queue.enabled: false`, for a small repo): step 8 changes. You review the
@@ -101,7 +119,8 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
    Rules for starting workers:
    - **Model:** `worker.model` in the config; `--model` overrides it for one worker.
    - **`--bypass`:** pass it only when this manager session also runs with bypassPermissions.
-     Otherwise workers stall on prompts nobody sees.
+     Otherwise workers stall on prompts nobody sees. `worker.bypass_permissions: true` makes
+     it the default; `--no-bypass` overrides that for one worker.
    - **Failures:** report the printed error. If the send step failed, the prompt may have
      arrived anyway. Read the terminal first and never re-send. Exit code 2 (`worker exited`)
      means the agent had quit before the prompt arrived; start it again in that terminal and
@@ -124,15 +143,19 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
    - **Details:** `orca terminal read --terminal <handle> --limit 60 --json`.
    - **No polling with `sleep`:** a foreground `sleep` is blocked by the harness.
    - **Context:** the `ctx` column (or `worktrees.py context`) shows each worker's estimated
-     context use. When one is flagged `!`, don't wait for it to finish on its own:
-     1. send it one line: `orca terminal send --terminal <handle> --text "WRAP UP: commit WIP, push, write handoff.md next to the brief, set the card to HANDOFF, stop." --enter --wait-submit 15 --json`
+     context use. When one is flagged `!` and `handoff.enabled` is true (the default), don't
+     wait for it to finish on its own:
+     1. send it the configured wrap-up line; `worktrees.py context` prints the exact
+        `orca terminal send` command with `handoff.wrap_up_message` filled in
      2. wait for `worktrees.py status <task>` to print `handoff` (or the agent to go idle)
      3. `python3 scripts/spawn_worker.py --name <task> --continue [--note "<what to do first>"]`
         It writes `handoff-digest.md` from the old session's transcript (files edited, last
-        messages, git state) and starts a fresh session in the same worktree that reads the
-        brief, the worker's own `handoff.md` if it wrote one, and the digest. If the old
-        session is already dead, skip step 1.
-     A package that needs this more than once was too big; split it next time.
+        messages, git state; skipped when `handoff.digest` is false) and starts a fresh
+        session in the same worktree that reads the brief, the worker's own `handoff.md` if
+        it wrote one, and the digest. If the old session is already dead, skip step 1.
+     If `handoff.enabled` is false, leave flagged workers alone; `--continue` is then only for
+     a worker that died. A package continued more than `handoff.max_continues` times gets a
+     `warning` in the output: it was too big, so split what's left.
 7. **Review each PR,** yourself or with a subagent. Send fixes as **one line**, because a
    newline can submit the text early:
    ```

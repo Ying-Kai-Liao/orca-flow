@@ -63,25 +63,33 @@ class ClassifyTest(unittest.TestCase):
         self.assertAttention(row(a=agent(msg="Two can go.\n\nShould I remove these five worktrees?")), "needs_human")
 
     def test_question_behind_markup_and_fullwidth(self):
-        self.assertAttention(row(a=agent(msg="**你原本指的是哪一張？**")), "needs_human")
+        self.assertAttention(row(a=agent(msg="**Which card did you mean\uff1f**")), "needs_human")
 
     def test_decision_phrase_without_final_period(self):
-        self.assertAttention(row(a=agent(msg="兩個方案都寫好了。\n\nA 還是 B,需要你拍板")), "needs_human")
+        self.assertAttention(row(a=agent(msg="Both plans are written.\n\nA or B, need you to decide")), "needs_human")
         self.assertAttention(row(a=agent(msg="Both are ready.\n\nShould I merge A or B")), "needs_human")
 
     # review item 1: a last paragraph ending with a period is a report; negated phrases don't count
     def test_decision_phrase_in_paragraph_ending_with_period_is_done(self):
-        self.assertAttention(row(a=agent(msg="這個需要你拍板。")), "done")
-        self.assertAttention(row(a=agent(msg="Deployed #148. Per the 2026-09-23 拍板, no per-batch approval.")), "done")
+        self.assertAttention(row(a=agent(msg="This one is your call.")), "done")
+        self.assertAttention(row(a=agent(msg="Deployed #148. Per your call on 2026-09-23, no per-batch approval.")), "done")
 
     def test_negated_decision_phrase_is_done(self):
-        self.assertAttention(row(a=agent(msg="#148 已部署到 demo 與 production,這次不需要你拍板。")), "done")
-        self.assertAttention(row(a=agent(msg="#148 已部署,不需要你拍板")), "done")
+        self.assertAttention(row(a=agent(msg="#148 is deployed to demo and production, no need for your call this time.")), "done")
+        self.assertAttention(row(a=agent(msg="#148 deployed, no need to please confirm")), "done")
         self.assertAttention(row(a=agent(msg="Deployed; no need for your call")), "done")
 
     def test_negation_only_cancels_its_own_phrase(self):
-        msg = "不需要你拍板 the deploy, but please confirm the new key works"
+        msg = "no need for your call on the deploy, but please confirm the new key works"
         self.assertAttention(row(a=agent(msg=msg)), "needs_human")
+
+    def test_configured_phrases_and_negations(self):
+        # board.decision_phrases / board.negations, for agents that don't write in English
+        r = row(a=agent(msg="Both are ready\n\nsign it off"))
+        self.assertEqual(classify(r)[0], "done")
+        self.assertEqual(classify(r, phrases=["Sign it off"])[0], "needs_human")
+        r = row(a=agent(msg="Both are ready\n\nskip, sign it off later"))
+        self.assertEqual(classify(r, phrases=["sign it off"], negations=["skip"])[0], "done")
 
     # review item 2: an unanswered question demotes to done after question_max_min
     def test_old_question_is_demoted(self):
@@ -102,7 +110,7 @@ class ClassifyTest(unittest.TestCase):
     # review item 3: code blocks and bracketed asides don't make a question
     def test_question_in_closing_brackets_is_done(self):
         self.assertAttention(row(a=agent(msg="Done. (Tests pass?)")), "done")
-        self.assertAttention(row(a=agent(msg="已部署。（測試過了嗎？）")), "done")
+        self.assertAttention(row(a=agent(msg="Deployed\u3002\uff08Tests pass\uff1f\uff09")), "done")
 
     def test_question_in_fenced_code_is_done(self):
         msg = "Merged and deployed.\n\n```\n$ curl /health?verbose\nok?\n```"
@@ -313,7 +321,9 @@ class BoardNoQueueTest(unittest.TestCase):
                 ("repo", "list"): {"repos": [{"id": "a", "path": "/tmp"}, {"id": "b", "path": "/"}]}}
         with mock.patch.object(board, "orca", side_effect=lambda *x: fake[x]), \
                 mock.patch.object(board, "git_common_dir", return_value=None), \
-                mock.patch.object(board, "repo_queue_enabled", side_effect=lambda root: root != "/tmp"):
+                mock.patch.object(board, "repo_settings",
+                                  side_effect=lambda root: {"no_queue": root == "/tmp", "stale_min": 30,
+                                                            "question_max_min": 240}):
             rows, _ = board.collect(30, use_gh=False)
         got = {r["worktree"]: (r["attention"], r["no_queue"]) for r in rows}
         self.assertEqual(got, {"a": ("done", True), "b": ("unhanded_pr", False)})
@@ -366,6 +376,17 @@ class RepoQueueEnabledTest(unittest.TestCase):
         other = self.write("elsewhere.json", '{"merge_queue": {"enabled": false}}')
         with mock.patch.dict(os.environ, {"ORCA_FLOW_CONFIG": other}):
             self.assertTrue(board.repo_queue_enabled(self.root))
+
+    def test_board_settings_and_local_overlay(self):
+        import board
+        self.write("orca-flow.json", '{"board": {"stale_min": 10}}')
+        common = subprocess.run(["git", "-C", self.root, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                capture_output=True, text=True).stdout.strip()
+        self.write(os.path.join(common, "orca-flow", "config.json"),
+                   '{"merge_queue": {"enabled": false}, "board": {"decision_phrases": ["sign it off"]}}')
+        st = board.repo_settings(self.root)
+        self.assertEqual((st["no_queue"], st["stale_min"], st["question_max_min"], st["decision_phrases"]),
+                         (True, 10, 240, ["sign it off"]))
 
 
 class WatchDiffTest(unittest.TestCase):

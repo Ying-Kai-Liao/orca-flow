@@ -274,7 +274,7 @@ def finish(a, steps, cfg, failed):
         todo = nulls(cfg)
         mode = ("with a merge queue (one queue session merges and deploys)" if cfgmod.queue_enabled(cfg)
                 else "without a queue (the manager reviews, runs the full check and merges)")
-        nxt = (("fill by hand: " + ", ".join(todo) if todo else "nothing left to fill")
+        nxt = (("fill with config.py set <key> <value>: " + ", ".join(todo) if todo else "nothing left to fill")
                + f"; this repo runs {mode}. Worker trust is set per worktree by spawn_worker.py.")
     if a.json:
         print(json.dumps({"ok": not failed, "steps": steps, "next": nxt}, ensure_ascii=False, indent=1))

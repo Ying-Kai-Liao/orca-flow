@@ -10,7 +10,7 @@ It only reads: `orca worktree ps`, `orca repo list`, `gh pr list` and the handov
 files. It never writes to Orca. Polling only, since Orca has no event stream.
 
 Usage:
-  board.py [--json] [--repo <name>] [--stale-min 30] [--question-max-min 240] [--no-gh]
+  board.py [--json] [--repo <name>] [--stale-min N] [--question-max-min N] [--no-gh]
   board.py --watch [--interval 20]     # prints only rows whose attention changed, timestamped
   board.py --write                     # also writes <git-common-dir>/orca-flow/board.json of this repo
 
@@ -100,24 +100,28 @@ def handover_status(common, number):
         return "?"
 
 
-def repo_queue_enabled(root):
-    """merge_queue.enabled from that repo's own config. The board spans every repo on the
-    host, so this can't use the config of the repo the skill resolved to, nor
-    $ORCA_FLOW_CONFIG, which names one repo's file. A config that can't be read counts as
-    having a queue: reporting an unhanded PR is the safer mistake."""
+def repo_settings(root):
+    """What the board reads from that repo's own config: whether it has a queue, and its
+    board.* values. The board spans every repo on the host, so this can't use the config of
+    the repo the skill resolved to, nor $ORCA_FLOW_CONFIG, which names one repo's file. A
+    config that can't be read counts as having a queue (reporting an unhanded PR is the safer
+    mistake) and as having default board settings."""
     try:
-        path = cfgmod.config_path(root, use_env=False)
-        if not path:
-            return True
-        with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
-        return cfgmod.queue_enabled(raw if isinstance(raw, dict) else {})
+        raw, _ = cfgmod.load_raw(root, use_env=False)
     except (OSError, ValueError):
-        return True
+        raw = {}
+    raw = raw if isinstance(raw, dict) else {}
+    board = cfgmod.merge(cfgmod.DEFAULTS["board"], raw.get("board") if isinstance(raw.get("board"), dict) else {})
+    return {"no_queue": not cfgmod.queue_enabled(raw), **board}
 
 
-def collect(stale_min, repo_filter=None, use_gh=True, question_max_min=board_rules.QUESTION_MAX_MIN):
-    """(rows, notes). Rows are already classified and sorted."""
+def repo_queue_enabled(root):
+    return not repo_settings(root)["no_queue"]
+
+
+def collect(stale_min=None, repo_filter=None, use_gh=True, question_max_min=None):
+    """(rows, notes). Rows are already classified and sorted. stale_min / question_max_min
+    override every repo's board.* config; None uses each repo's own (or the defaults)."""
     notes = []
     ps = orca("worktree", "ps", "--limit", "1000")
     if ps.get("truncated"):
@@ -130,15 +134,14 @@ def collect(stale_min, repo_filter=None, use_gh=True, question_max_min=board_rul
     by_repo = {}
     for w in worktrees:
         by_repo.setdefault(w.get("repoId"), []).append(w)
-    prs, commons, no_queue = {}, {}, set()
+    prs, commons, settings = {}, {}, {}
     for repo_id, wts in by_repo.items():
         repo = repos.get(repo_id) or {}
         root = repo.get("path") or wts[0].get("path")
         if repo.get("kind") == "folder" or not root or not os.path.isdir(root):
             continue
         commons[repo_id] = git_common_dir(root)
-        if not repo_queue_enabled(root):
-            no_queue.add(repo_id)
+        settings[repo_id] = repo_settings(root)
         branches = {(w.get("branch") or "").removeprefix("refs/heads/") for w in wts} - BASE_NAMES - {""}
         if use_gh and branches:
             prs[repo_id] = repo_prs(root)
@@ -163,11 +166,13 @@ def collect(stale_min, repo_filter=None, use_gh=True, question_max_min=board_rul
         handover = handover_status(commons.get(w.get("repoId")), pr and pr["number"])
         # A worktree with no agent pane still gets one row: a BLOCKED card or an unhanded PR
         # matters whether or not a session is open on it.
+        st = settings.get(w.get("repoId")) or {"no_queue": False, **cfgmod.DEFAULTS["board"]}
         for ag in (w.get("agents") or [None]):
-            row = board_rules.make_row(w, ag, now_ms, pr=pr, handover=handover,
-                                       no_queue=w.get("repoId") in no_queue)
-            row["attention"], row["reason"] = board_rules.classify(row, stale_min=stale_min,
-                                                                   question_max_min=question_max_min)
+            row = board_rules.make_row(w, ag, now_ms, pr=pr, handover=handover, no_queue=st["no_queue"])
+            row["attention"], row["reason"] = board_rules.classify(
+                row, stale_min=st["stale_min"] if stale_min is None else stale_min,
+                question_max_min=st["question_max_min"] if question_max_min is None else question_max_min,
+                phrases=st.get("decision_phrases") or (), negations=st.get("negations") or ())
             row["label"] = row["worktree"] or "?"
             if len(w.get("agents") or []) > 1:
                 # Several panes in one worktree (the main checkout often has a dozen) would
@@ -298,10 +303,10 @@ def main():
     p = argparse.ArgumentParser(description="Attention board over Orca's live agent state.")
     p.add_argument("--json", action="store_true")
     p.add_argument("--repo", help="only this Orca repo (its display name)")
-    p.add_argument("--stale-min", type=float, default=board_rules.STALE_MIN,
-                   help="a working pane with no update for longer than this is stale (default 30)")
-    p.add_argument("--question-max-min", type=float, default=board_rules.QUESTION_MAX_MIN,
-                   help="a question in an agent's message older than this is demoted to done (default 240)")
+    p.add_argument("--stale-min", type=float,
+                   help="a working pane with no update for longer than this is stale (default: each repo's board.stale_min, 30)")
+    p.add_argument("--question-max-min", type=float,
+                   help="a question older than this is demoted to done (default: each repo's board.question_max_min, 240)")
     p.add_argument("--watch", action="store_true")
     p.add_argument("--interval", type=float, default=20)
     p.add_argument("--write", action="store_true", help="also write <git-common-dir>/orca-flow/board.json")

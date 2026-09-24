@@ -47,7 +47,7 @@ import transcript  # noqa: E402
 
 ORCA = os.environ.get("ORCA_CLI_COMMAND", "orca")
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESERVED = {"brief.md", "common.md", "handoff.md", "handoff-digest.md", "manager.json"}
+RESERVED = {"brief.md", "common.md", "handoff.md", "handoff-digest.md", "manager.json", "continues.txt"}
 
 
 def die(msg, **extra):
@@ -170,6 +170,7 @@ def render_rules(cfg, test_lock, base):
         test_rule = (f"- Find how this project runs a single test file and run only the tests related to "
                      f"what you changed. Wrap the run in the test lock so parallel worktrees queue up:\n"
                      f"  ```\n  bash {test_lock} <your test command>\n  ```\n")
+    handoff_rule = render_handoff(cfg)
     run_rule = ""
     if w.get("run_command"):
         run_rule = (f"- For a UI change, start the app (`{w['run_command']}`) and look at it in Orca's "
@@ -190,8 +191,48 @@ def render_rules(cfg, test_lock, base):
            .replace("{{FULL_CHECK_RULE}}", full_rule)
            .replace("{{CHECKS_RULE}}", checks_rule)
            .replace("{{TEST_RULE}}", test_rule)
-           .replace("{{RUN_RULE}}", run_rule))
+           .replace("{{RUN_RULE}}", run_rule)
+           .replace("{{HANDOFF_RULE}}", handoff_rule))
     return re.sub(r"\n{3,}", "\n\n", out)
+
+
+def render_handoff(cfg):
+    """The "Handing off and continuing" section. With handoff.enabled false the manager never
+    wraps a worker up, so only the part about being a continued session stays: --continue
+    still restarts a worker that died."""
+    fresh = ("If **you** are a fresh session continuing someone else's work, the prompt that started "
+             "you said so: read the handoff files it named, check `git status` and `git log` yourself "
+             "before trusting them, and don't redo finished work.\n")
+    if not cfgmod.handoff_enabled(cfg):
+        return "## Continuing\n\n" + fresh
+    msg = (cfg.get("handoff") or {}).get("wrap_up_message") or cfgmod.DEFAULTS["handoff"]["wrap_up_message"]
+    lead = msg.split(":")[0].strip() if ":" in msg[:30] else msg[:30]
+    return (
+        "## Handing off and continuing\n\n"
+        "Your context is finite and you can't see how full it is; the manager can. If the manager "
+        f"sends you a line starting with `{lead}`, stop building and, in this order:\n\n"
+        "1. Commit what you have, even if unfinished (`WIP:` prefix in the message), and push.\n"
+        "2. Write `handoff.md` next to the brief: what's done, what's left (as a checklist), which\n"
+        "   functions you touched, any decision you made and why, anything the next session must not\n"
+        "   redo. Keep it under a page.\n"
+        "3. `orca worktree set --worktree active --comment \"HANDOFF: <one line>\" --json`, then stop.\n\n"
+        "A fresh session continues from the brief plus your `handoff.md`. " + fresh)
+
+
+def bump_continues(brief_dir, dry):
+    """How many times this package has been continued, counting this one. Kept in
+    continues.txt next to the brief, so it survives manager sessions."""
+    path = os.path.join(brief_dir, "continues.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            n = int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        n = 0
+    n += 1
+    if not dry:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{n}\n")
+    return n
 
 
 def write_manager(brief_dir, session):
@@ -358,37 +399,50 @@ def continue_worker(a, cfg, wt, brief_dir, brief_path, common_path, test_lock, a
     path = wt.get("path")
     if not os.path.isfile(brief_path):
         die(f"no brief at {brief_path}; this worktree wasn't started by spawn_worker.py. Pass --brief on a fresh spawn instead.")
-    tfile = transcript.latest_transcript(path, cfg["worker"].get("transcripts_dir"))
+    ho = cfg.get("handoff") or {}
+    want_digest = ho.get("digest") is not False
+    tfile = transcript.latest_transcript(path, cfg["worker"].get("transcripts_dir")) if want_digest else None
     digest_path = os.path.join(brief_dir, "handoff-digest.md")
     handoff_path = os.path.join(brief_dir, "handoff.md")
     has_own = os.path.isfile(handoff_path)
+    count = bump_continues(brief_dir, dry)
+    limit = ho.get("max_continues")
+    warning = (f"this package has now been continued {count} times (handoff.max_continues is {limit}): "
+               f"it is too big for one worker; split what's left into new packages"
+               if isinstance(limit, int) and count > limit else None)
+    reads = ([f"{handoff_path} (the previous worker's own handoff)"] if has_own else []) \
+        + ([f"{digest_path} (a digest of what it did, generated from its transcript)"] if want_digest else [])
     prompt = (
         f"You are continuing the \"{a.name}\" package after the previous worker session ended. First read "
-        f"{common_path} (the rules), then {brief_path} (the package), then "
-        + (f"{handoff_path} (the previous worker's own handoff) and " if has_own else "")
-        + f"{digest_path} (a digest of what it did, generated from its transcript). Check the worktree's git "
-        f"state yourself before trusting either. Don't redo finished work. "
+        f"{common_path} (the rules), then {brief_path} (the package)"
+        + (", then " + " and ".join(reads) if reads else "")
+        + ". Check the worktree's git state yourself before trusting any of it. Don't redo finished work. "
         + (f"From the manager: {a.note} " if a.note else "")
         + "Then carry on to completion and report as the rules' last sections describe."
     )
     base_info = {"name": a.name, "worktree_id": wt.get("id"), "path": path, "brief_dir": brief_dir,
-                 "continued": True, "previous_transcript": tfile, "handoff_md": has_own}
+                 "continued": True, "continues": count, "previous_transcript": tfile, "handoff_md": has_own}
+    if warning:
+        base_info["warning"] = warning
     if dry:
         print(json.dumps({"ok": True, "dry_run": True, **base_info,
                           "trust": f"would trust {path}",
-                          "would_write": digest_path if tfile else None,
+                          "would_write": digest_path if want_digest else None,
                           "commands": [shlex.join([ORCA, "terminal", "create", "--worktree", f"id:{wt.get('id')}", "--title", "worker (cont.)", "--command", agent_cmd, "--json"]),
                                        shlex.join([ORCA, "terminal", "send", "--terminal", "<handle>", "--text", prompt, "--enter", "--wait-submit", "20", "--json"])]},
                          ensure_ascii=False, indent=1))
         return
-    if tfile:
+    if not want_digest:
+        text = None
+    elif tfile:
         text = transcript.render_digest(transcript.digest(tfile), path, transcript.git_summary(path, base))
     else:
         text = ("# Handoff digest\n\nNo transcript was found for the previous session, so there is nothing to "
                 "summarise. Work from the brief, handoff.md if present, and the git state:\n\n```\n"
                 + transcript.git_summary(path, base) + "\n```\n")
-    with open(digest_path, "w", encoding="utf-8") as f:
-        f.write(text)
+    if text is not None:
+        with open(digest_path, "w", encoding="utf-8") as f:
+            f.write(text)
     # Re-render the rules: the config may have changed since the first spawn.
     with open(common_path, "w", encoding="utf-8") as f:
         f.write(render_rules(cfg, test_lock, base))
@@ -410,7 +464,9 @@ def main():
     p.add_argument("--comment", help="the Orca card's status line; defaults to the brief's title")
     p.add_argument("--model", help="agent model; defaults to worker.model in the config")
     p.add_argument("--agent-command", help="full command to start the agent; overrides --model")
-    p.add_argument("--bypass", action="store_true", help="run the worker with bypassPermissions (only if this session is too)")
+    p.add_argument("--bypass", action="store_true", default=None,
+                   help="run the worker with bypassPermissions (only if this session is too); default: worker.bypass_permissions")
+    p.add_argument("--no-bypass", dest="bypass", action="store_false", help="override worker.bypass_permissions: true")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
     dry = a.dry_run or os.environ.get("ORCA_FLOW_DRY_RUN") == "1"
@@ -464,7 +520,8 @@ def main():
 
     model = a.model or cfg["worker"].get("model") or "opus"
     agent_cmd = a.agent_command or f"claude --model {model}"
-    if a.bypass and not a.agent_command:
+    bypass = a.bypass if a.bypass is not None else cfg["worker"].get("bypass_permissions") is True
+    if bypass and not a.agent_command:
         agent_cmd += " --permission-mode bypassPermissions"
     # One line: multi-line text sent to a TUI can submit at the first newline.
     # Deliberately no "done" marker wording here: the prompt stays on screen, and a manager

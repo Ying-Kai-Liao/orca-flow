@@ -49,21 +49,7 @@ described in the last section.
   write the details in your terminal.
 - `--worktree active` resolves from your cwd, so run it inside your own worktree.
 
-## Handing off and continuing
-
-Your context is finite and you can't see how full it is; the manager can. If the manager
-sends you a line starting with `WRAP UP`, stop building and, in this order:
-
-1. Commit what you have, even if unfinished (`WIP:` prefix in the message), and push.
-2. Write `handoff.md` next to the brief: what's done, what's left (as a checklist), which
-   functions you touched, any decision you made and why, anything the next session must not
-   redo. Keep it under a page.
-3. `orca worktree set --worktree active --comment "HANDOFF: <one line>" --json`, then stop.
-
-A fresh session continues from the brief plus your `handoff.md`. If **you** are that fresh
-session, the prompt that started you said so: read the handoff files it named, check
-`git status` and `git log` yourself before trusting them, and don't redo finished work.
-
+{{HANDOFF_RULE}}
 ## When you're unsure
 
 - Product decisions: don't stop to ask, and don't invent something ambitious. Take the

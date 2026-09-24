@@ -31,7 +31,7 @@ scripts/transcript.py         read a session's transcript: context estimate, han
 scripts/archive_status.py     move old status-file entries into an archive
 scripts/test-lock.sh          flock-based queue so N test runs share the machine
 scripts/main_checkout_guard.py PreToolUse hook keeping the main checkout on its base branch
-scripts/config.py             config loader (show / get / init)
+scripts/config.py             config: show · get · keys · set · unset · check · init
 examples/                     ready-made configs
 evals/                        eval suite for the skill
 ```
@@ -61,6 +61,10 @@ Then tell it about the project:
 ```bash
 python3 ~/.claude/skills/orca-flow/scripts/config.py init   # writes <repo>/.claude/orca-flow.json
 python3 ~/.claude/skills/orca-flow/scripts/config.py show   # what actually resolved
+python3 ~/.claude/skills/orca-flow/scripts/config.py keys   # every key, its current value and what it does
+python3 ~/.claude/skills/orca-flow/scripts/config.py set handoff.enabled false         # change one
+python3 ~/.claude/skills/orca-flow/scripts/config.py set worker.context_warn 0.5 --local  # just for you, never committed
+python3 ~/.claude/skills/orca-flow/scripts/config.py check  # type-check the files
 ```
 
 Fill in how your project is tested, checked and deployed. Every key is optional and documented in
