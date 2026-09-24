@@ -15,7 +15,7 @@ The brief, its attachments, the worker rules and the test lock are copied into
 Usage:
   spawn_worker.py --name <task-slug> --brief <brief.md> [--attach img ...] [--base <ref>]
                   [--comment text] [--model <name>] [--manager <session name>] [--bypass] [--dry-run]
-  spawn_worker.py --name <task-slug> --continue [--note "..."] [--model <name>] [--bypass] [--dry-run]
+  spawn_worker.py --name <task-slug> --continue [--note "..."] [--model <name>] [--bypass] [--force] [--dry-run]
 
 --continue starts a fresh session in an existing worktree whose worker ran out of context
 (or died). It reads the previous session's transcript from disk and writes a digest next to
@@ -23,6 +23,8 @@ the brief (handoff-digest.md), so the new worker starts from a page, not from th
 If the old worker wrote its own handoff.md (the wrap-up rule), the new one reads that too.
 With handoff.bin set, the Stop hook of jev-handoff is installed into every worker
 worktree, and --continue names the previous session's working set before everything else.
+--continue refuses (exit 2) while Orca still reports an agent pane in the worktree; close the
+old terminal first, or pass --force.
 
 The brief folder also gets a manager.json naming the session and terminal that started the
 worker, so later sessions can tell who owns a package instead of guessing.
@@ -366,6 +368,25 @@ def read_tail(handle, limit=25):
     return tail if isinstance(tail, list) else None
 
 
+def bin_ok(hs):
+    """One check for every caller: a bin that exists but can't be executed would pass
+    find_handoff and then fail every refresh."""
+    return bool(hs["bin"]) and os.path.isfile(hs["bin"]) and os.access(hs["bin"], os.X_OK)
+
+
+def hook_state_dir_warning(hs):
+    """install-hook can't carry a state dir: the hook writes to $JEV_HANDOFF_STATE_DIR or
+    jev-handoff's default, while --continue reads handoff.state_dir. When they differ the
+    working set is never found, so say so on every install."""
+    env = os.environ.get("JEV_HANDOFF_STATE_DIR")
+    writes = os.path.realpath(os.path.expanduser(env or cfgmod.DEFAULTS["handoff"]["state_dir"]))
+    if writes == os.path.realpath(hs["state_dir"]):
+        return ""
+    return (f". WARNING: the hook writes to {writes} ({'$JEV_HANDOFF_STATE_DIR' if env else 'the jev-handoff default'}) "
+            f"but handoff.state_dir is {hs['state_dir']}; set JEV_HANDOFF_STATE_DIR to it where workers run, "
+            f"or change handoff.state_dir")
+
+
 def handoff_hook(hs, wt_path, dry=False):
     """Install jev-handoff's Stop hook into the worktree's .claude/settings.local.json, or a
     note saying why not; None when the feature is off.
@@ -377,11 +398,12 @@ def handoff_hook(hs, wt_path, dry=False):
         return None
     if not wt_path:
         return "skipped hook: the worktree has no path"
-    if not (os.path.isfile(hs["bin"]) and os.access(hs["bin"], os.X_OK)):
+    if not bin_ok(hs):
         return f"skipped hook: {hs['bin']} is missing or not executable (handoff.bin)"
+    warn = hook_state_dir_warning(hs)
     cmd = [hs["bin"], "install-hook", "--settings", os.path.join(wt_path, ".claude", "settings.local.json")]
     if dry:
-        return "would run " + shlex.join(cmd)
+        return "would run " + shlex.join(cmd) + warn
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -389,14 +411,14 @@ def handoff_hook(hs, wt_path, dry=False):
     if r.returncode != 0:
         return f"hook install failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}"
     # install-hook prints a diff, then one summary line ("updated …" / "already installed in …").
-    return "hook: " + ((r.stdout.strip().splitlines() or [""])[-1])
+    return "hook: " + ((r.stdout.strip().splitlines() or [""])[-1]) + warn
 
 
 def refresh_handoff(hs, tfile, task, dry=False):
     """Bring the working set up to date with the transcript's last lines (the Stop hook has an
     8 s budget and may have been cut off, or the session died mid-turn). A note, or None.
     Failures are only noted: a stale working set is still better than none."""
-    if not hs["bin"] or not tfile or not (os.path.isfile(hs["bin"]) and os.access(hs["bin"], os.X_OK)):
+    if not tfile or not bin_ok(hs):
         return None
     cmd = [hs["bin"], "--state-dir", hs["state_dir"], "run", "--transcript", tfile, "--task", task]
     if dry:
@@ -417,8 +439,8 @@ def find_handoff(hs, tfile):
     to the brief."""
     if not hs["bin"]:
         return None, "feature off (handoff.bin is not set)"
-    if not os.path.isfile(hs["bin"]):
-        return None, f"bin not found: {hs['bin']}"
+    if not bin_ok(hs):
+        return None, f"bin not found or not executable: {hs['bin']}"
     if not tfile:
         return None, "no transcript for the previous session, so no session id"
     sid = os.path.splitext(os.path.basename(tfile))[0]
@@ -527,12 +549,28 @@ def start_agent(wt_id, agent_cmd, prompt, base_info, title="worker"):
     }, ensure_ascii=False, indent=1))
 
 
+def live_agents(wt_id):
+    """Agent panes Orca still reports in that worktree. Any pane counts, "done" included: a
+    done pane is a Claude TUI still sitting at its prompt, and a second session started
+    beside it means two agents editing one checkout."""
+    w = next((w for w in orca("worktree", "ps").get("worktrees", []) if w.get("worktreeId") == wt_id), None)
+    return [ag for ag in (w or {}).get("agents") or []]
+
+
 def continue_worker(a, cfg, wt, brief_dir, brief_path, common_path, test_lock, agent_cmd, base, dry):
     """Fresh session, same worktree, same brief. The previous session's transcript is on
     disk; a digest of it (files edited, last messages, git state) goes next to the brief."""
     path = wt.get("path")
     if not os.path.isfile(brief_path):
         die(f"no brief at {brief_path}; this worktree wasn't started by spawn_worker.py. Pass --brief on a fresh spawn instead.")
+    live = [] if a.force else live_agents(wt.get("id"))
+    if live:
+        print(json.dumps({"ok": False, "error": f"{a.name} still has {len(live)} live agent pane(s); close the old terminal first",
+                          "agents": [{"state": ag.get("state"), "paneKey": ag.get("paneKey")} for ag in live],
+                          "note": f"orca terminal list --worktree id:{wt.get('id')} --json, then orca terminal close --terminal <handle> --json, "
+                                  "then run --continue again. --force starts the new session anyway."},
+                         ensure_ascii=False, indent=1))
+        sys.exit(2)
     ho = cfg.get("handoff") or {}
     want_digest = ho.get("digest") is not False
     tfile = transcript.latest_transcript(path, cfg["worker"].get("transcripts_dir")) if want_digest else None
@@ -614,6 +652,7 @@ def main():
     p.add_argument("--bypass", action="store_true", default=None,
                    help="run the worker with bypassPermissions (only if this session is too); default: worker.bypass_permissions")
     p.add_argument("--no-bypass", dest="bypass", action="store_false", help="override worker.bypass_permissions: true")
+    p.add_argument("--force", action="store_true", help="with --continue: start even if Orca still reports an agent pane in the worktree")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
     dry = a.dry_run or os.environ.get("ORCA_FLOW_DRY_RUN") == "1"

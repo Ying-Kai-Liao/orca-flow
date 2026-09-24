@@ -365,7 +365,8 @@ def handoff_settings(cfg):
     return {"bin": os.path.expanduser(h["bin"]) if h.get("bin") else None,
             "state_dir": os.path.expanduser(h.get("state_dir") or d["state_dir"]),
             "hook": h.get("hook") is not False,
-            "max_inline_lines": int(h.get("max_inline_lines") or d["max_inline_lines"])}
+            # 0 is a real value (always grep, never read inline); only a missing one takes the default.
+            "max_inline_lines": int(d["max_inline_lines"] if h.get("max_inline_lines") is None else h["max_inline_lines"])}
 
 
 def dig(cfg, dotted):

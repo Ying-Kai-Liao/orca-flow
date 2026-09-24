@@ -116,6 +116,14 @@ class HookTest(Base):
         self.assertIn("updated", note)
         self.assertEqual(self.calls(), [f"install-hook --settings {settings}"])
 
+    def test_hook_warns_when_state_dir_differs_from_where_the_hook_writes(self):
+        hs = cfgmod.handoff_settings(self.cfg())
+        with mock.patch.dict(os.environ, {"JEV_HANDOFF_STATE_DIR": ""}):
+            os.environ.pop("JEV_HANDOFF_STATE_DIR")
+            self.assertIn("WARNING", spawn_worker.handoff_hook(hs, self.wt, dry=True))
+        with mock.patch.dict(os.environ, {"JEV_HANDOFF_STATE_DIR": self.state}):
+            self.assertNotIn("WARNING", spawn_worker.handoff_hook(hs, self.wt, dry=True))
+
     def test_hook_dry_run_only_names_the_command(self):
         note = spawn_worker.handoff_hook(cfgmod.handoff_settings(self.cfg()), self.wt, dry=True)
         self.assertTrue(note.startswith("would run "))
@@ -138,6 +146,19 @@ class RulesTest(Base):
         self.assertNotIn("jev-handoff", spawn_worker.render_handoff(self.cfg(bin=None)))
         # handoff.enabled false keeps only the continuing part, which still needs the rule.
         self.assertIn("jev-handoff working set", spawn_worker.render_handoff(self.cfg(enabled=False)))
+
+    def test_max_inline_lines_zero_stays_zero(self):
+        self.assertEqual(cfgmod.handoff_settings(self.cfg(max_inline_lines=0))["max_inline_lines"], 0)
+        self.assertEqual(cfgmod.handoff_settings(self.cfg(max_inline_lines=None))["max_inline_lines"], 150)
+        self.write_transcript()
+        self.assertIn("grep it", spawn_worker.working_set_for(self.wt, self.cfg(max_inline_lines=0), "t")["read_first"])
+
+    def test_non_executable_bin_is_off_everywhere(self):
+        os.chmod(self.bin, 0o644)
+        self.write_transcript()
+        ws = spawn_worker.working_set_for(self.wt, self.cfg(), "t")
+        self.assertIn("not executable", ws["reason"])
+        self.assertIsNone(ws["refresh"])
 
     def test_keys_are_in_the_schema(self):
         for k in ("bin", "state_dir", "hook", "max_inline_lines"):
@@ -185,7 +206,7 @@ class WorkingSetTest(Base):
 
 
 class ContinueTest(Base):
-    def run_continue(self, cfg, dry=False):
+    def run_continue(self, cfg, dry=False, agents=(), force=False):
         brief_dir = os.path.join(self.tmp, "briefs", "pkg")
         os.makedirs(brief_dir, exist_ok=True)
         brief = os.path.join(brief_dir, "brief.md")
@@ -196,9 +217,15 @@ class ContinueTest(Base):
         def fake_start(wt_id, agent_cmd, prompt, base_info, title="worker"):
             sent.update(prompt=prompt, info=base_info)
 
-        a = types.SimpleNamespace(name="pkg", note=None, manager=None)
+        a = types.SimpleNamespace(name="pkg", note=None, manager=None, force=force)
         out = io.StringIO()
-        with mock.patch.object(spawn_worker, "orca", return_value={}), \
+
+        def fake_orca(*args, context=None):
+            if args[:2] == ("worktree", "ps"):
+                return {"worktrees": [{"worktreeId": "w1", "agents": list(agents)}]}
+            return {}
+
+        with mock.patch.object(spawn_worker, "orca", fake_orca), \
                 mock.patch.object(spawn_worker, "start_agent", fake_start), \
                 mock.patch.object(spawn_worker, "ensure_trusted", return_value="trusted"), \
                 contextlib.redirect_stdout(out):
@@ -243,6 +270,19 @@ class ContinueTest(Base):
         self.assertNotIn("handoff_hook", sent["info"])
         self.assertEqual(self.calls(), [])
 
+    def test_refuses_while_an_agent_pane_is_live(self):
+        self.write_transcript()
+        for state in ("working", "done"):
+            with self.assertRaises(SystemExit) as cm:
+                self.run_continue(self.cfg(), agents=[{"state": state, "paneKey": "p1"}])
+            self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(self.calls(), [])  # refused before refreshing or installing anything
+
+    def test_force_overrides_the_live_pane_check(self):
+        self.write_transcript()
+        sent, _ = self.run_continue(self.cfg(), agents=[{"state": "working"}], force=True)
+        self.assertIn("handoff.md", sent["prompt"])
+
     def test_dry_run_reports_handoff_block_and_writes_nothing(self):
         self.write_transcript()
         res, brief_dir = self.run_continue(self.cfg(), dry=True)
@@ -274,24 +314,38 @@ class WorktreesTest(Base):
         self.assertEqual(h["path"], os.path.join(d, "handoff.md"))
         self.assertEqual(worktrees.fmt_hf(h), "hf 10m")
 
+    def test_no_hf_column_without_bin(self):
+        # The exact separator the lines had before the column existed.
+        self.assertEqual(worktrees.hf_cell({}, on=False), "  ")
+        self.assertEqual(worktrees.hf_cell({"handoff": {"age_s": 180}}, on=True), " hf 3m  ")
+        self.assertEqual(worktrees.hf_cell({}, on=True), " hf -   ")
+
+    def test_untracked_hook_file_counts_without_bin(self):
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "XDG_CONFIG_HOME": self.tmp}):
+            os.makedirs(os.path.join(self.wt, ".claude"))
+            with open(os.path.join(self.wt, ".claude", "settings.local.json"), "w") as f:
+                f.write("{}")
+            self.assertEqual(worktrees.dirty_count(self.wt, own_hook=False), 1)
+            self.assertEqual(worktrees.dirty_count(self.wt, own_hook=True), 0)
+
     def test_cleanup_ignores_the_hook_settings_file(self):
-        # A global excludes file (this machine's ignores settings.local.json) would hide the case.
-        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull}):
+        # A global excludes file (this machine's ~/.config/git/ignore has settings.local.json) would hide the case.
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "XDG_CONFIG_HOME": self.tmp}):
             spawn_worker.handoff_hook(cfgmod.handoff_settings(self.cfg()), self.wt)
             with open(os.path.join(self.wt, ".claude", "settings.local.json.bak"), "w") as f:
                 f.write("{}")
             out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=self.wt,
                                  capture_output=True, text=True).stdout
-            self.assertIn(".claude/settings.local.json", out)
-            self.assertEqual(worktrees.dirty_count(self.wt), 0)
-            row = {"name": "x", "exists": True, "dirty": worktrees.dirty_count(self.wt), "busy": False,
+            self.assertIn("?? .claude/settings.local.json\n", out)
+            self.assertEqual(worktrees.dirty_count(self.wt, own_hook=True), 0)
+            row = {"name": "x", "exists": True, "dirty": worktrees.dirty_count(self.wt, own_hook=True), "busy": False,
                    "comment": "", "pr_known": True, "pr": None, "ahead": 0, "on_base": False,
                    "branch": "main", "idle_hours": 10, "status": None}
             self.assertTrue(worktrees.decide(row, 3)[0])
             # Anything else untracked is still work.
             with open(os.path.join(self.wt, ".claude", "notes.md"), "w") as f:
                 f.write("x")
-            self.assertEqual(worktrees.dirty_count(self.wt), 1)
+            self.assertEqual(worktrees.dirty_count(self.wt, own_hook=True), 1)
 
 
 if __name__ == "__main__":
