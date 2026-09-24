@@ -96,7 +96,7 @@ class InitTest(unittest.TestCase):
         self.assertIs(cfg["merge_queue"]["enabled"], True)
         for d in ("briefs", "queue", "bin"):
             self.assertTrue(os.path.isdir(os.path.join(root, ".git", "orca-flow", d)))
-        self.assertIn("fill by hand: merge_queue.targets;", res["next"])
+        self.assertIn("fill with config.py set <key> <value>: merge_queue.targets;", res["next"])
         self.assertIn("with a merge queue", res["next"])
 
     def test_nothing_detected_leaves_both_commands_null(self):

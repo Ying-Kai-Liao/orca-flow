@@ -9,8 +9,8 @@ up even when no session is open on it.
 python3 scripts/board.py                    # the board
 python3 scripts/board.py --json             # same rows as JSON: {"at", "rows", "notes"}
 python3 scripts/board.py --repo peace-guardian
-python3 scripts/board.py --stale-min 45     # working with no update for > 45 min is stale (default 30)
-python3 scripts/board.py --question-max-min 120   # a question in the text older than this is demoted to done (default 240)
+python3 scripts/board.py --stale-min 45     # working with no update for > 45 min is stale (default: board.stale_min, 30)
+python3 scripts/board.py --question-max-min 120   # a question older than this is demoted to done (default: board.question_max_min, 240)
 python3 scripts/board.py --watch [--interval 20]   # prints the board once, then only rows whose attention changed
 python3 scripts/board.py --write            # also writes <git-common-dir>/orca-flow/board.json of this repo
 python3 scripts/board.py --no-gh            # skip gh; PRs come only from Orca's linked PR
@@ -24,7 +24,7 @@ Ctrl-C exits cleanly. `--write` replaces board.json atomically (tmp file + renam
 
 ## The classifier
 
-`scripts/board_rules.py` holds `classify(row, stale_min=30, question_max_min=240) -> (attention, reason)`. It is pure:
+`scripts/board_rules.py` holds `classify(row, stale_min=30, question_max_min=240, phrases=(), negations=()) -> (attention, reason)`. It is pure:
 a plain dict in, two strings out, no Orca, gh, git, file or clock access. The separate
 `jev-handoff` project imports it and can replace it with a scored model of the same signature.
 `worktrees.py inventory` uses it too (its "waiting on the user" and "open PRs with no handover
@@ -37,7 +37,7 @@ Rules, first match wins:
 | 1 | `needs_human` | Orca state is `waiting` or `permission` |
 | 2 | `blocked` | card comment starts with `BLOCKED` (any case) |
 | 3 | `handoff` | card comment starts with `HANDOFF` (what `worktrees.py status` prints as `handoff`) |
-| 4 | `needs_human` | agent not working, and its last message ends with `?`/`？`, or its **last paragraph** contains a decision request: 拍板, 請確認, 需要你決定, 你決定, "should I", "which do you want", "which one do you want", "do you want me to", "please/can you/could you confirm", "your call", "let me know which". Demoted to `done` ("asked Nh ago, no answer; demoted") when `minutes_in_state` > `question_max_min` |
+| 4 | `needs_human` | agent not working, and its last message ends with `?` (or a full-width question mark), or its **last paragraph** contains a decision request: "should I", "which do you want", "which one do you want", "do you want me to", "please/can you/could you confirm", "your call", "let me know which", "need you to decide", "please decide", plus the repo's `board.decision_phrases`. Demoted to `done` ("asked Nh ago, no answer; demoted") when `minutes_in_state` > `question_max_min` |
 | 5 | `unhanded_pr` | PR open, not a draft, no handover file (or one with status `returned`), agent not working. In a repo with `merge_queue.enabled: false` (row `no_queue`) this is `done`, "no queue in this repo" |
 | 6 | `stale` | state `working` and `minutes_since_update` > `stale_min` |
 | 7 | `working` | state `working` |
@@ -49,15 +49,28 @@ Rule 4 is narrow on purpose: the merge queue and workers end with status reports
 report must stay `done`. Before looking at the message it:
 - drops fenced code blocks, since a `?` in a script or log line is not a question
 - ignores trailing markup and a trailing bracketed aside: `Done. (Tests pass?)` is done
-- treats a last paragraph ending in `.` or `。` as a report, whatever phrases it contains
-  (`Deployed #148. Per the 2026-09-23 拍板, no per-batch approval.` is done)
-- skips a phrase preceded within 12 characters by a negation (不需要, 不用, 不必, 無需, 毋需,
-  "no need", "not need", "don't/doesn't need"), so `這次不需要你拍板` is done
+- treats a last paragraph ending in `.` (or a full-width full stop) as a report, whatever
+  phrases it contains (`Deployed #148. Per your call on 2026-09-23, no per-batch approval.` is done)
+- skips a phrase preceded within 12 characters by a negation ("no need", "not need",
+  "don't/doesn't need", plus `board.negations`), so `no need for your call this time` is done
 
 A bare "confirm" doesn't count, because "I confirmed …" is common in reports. A question
 that has gone unanswered for longer than `question_max_min` is demoted to `done`: by then the
 user has seen it or moved on, and a pile of day-old questions hides the fresh one. Rule 1
 (Orca's own `waiting`) is never demoted.
+
+### Settings per repo
+
+The board spans every repo on the host, so it reads each repo's own config (its
+`orca-flow.json` plus the local `<git-common-dir>/orca-flow/config.json`, never
+`$ORCA_FLOW_CONFIG`) for `board.stale_min`, `board.question_max_min`, `board.decision_phrases`
+and `board.negations`. A flag on the command line overrides every repo. The built-in phrases
+are English; when a repo's agents write in another language, add that language's phrases:
+```
+python3 scripts/config.py set board.decision_phrases '["<phrase>", "<phrase>"]'
+python3 scripts/config.py set board.negations "<negation>" --append
+```
+Phrases match lowercase, anywhere in the last paragraph.
 
 An unreadable handover file, or one with no status, reads as `?` and counts as handed over.
 That matches `worktrees.py inventory`. A file with status `returned` (sent back by the queue)

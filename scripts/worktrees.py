@@ -13,7 +13,7 @@ Usage:
   worktrees.py context [<name>]       # context estimate per worker session, flags the ones over worker.context_warn
   worktrees.py handoff <name>         # write briefs/<name>/handoff-digest.md from the worker's transcript and print it
   worktrees.py overlap <path...>      # open PRs / worktrees touching these paths, plus migration numbers already taken
-  worktrees.py cleanup [--idle-hours 3] [--no-fetch]
+  worktrees.py cleanup [--idle-hours N] [--no-fetch]   # N defaults to cleanup.idle_hours (3)
   worktrees.py cleanup --apply a,b [--dry-run]   # removes only the named ones that are still candidates
 
 "Merged" is judged three ways, because a worktree's branch name is not reliable: the PR
@@ -44,8 +44,12 @@ KEEP = set(CFG.get("keep_worktrees") or [])
 BASE = CFG.get("base_branch") or "origin/main"
 REMOTE = BASE.split("/")[0] if "/" in BASE else "origin"
 CTX_WINDOW = int(CFG["worker"].get("context_window") or 200000)
-CTX_WARN = float(CFG["worker"].get("context_warn") or 0.35)
+# worker.context_warn may be a fraction of the window or a token count; compare in tokens.
+CTX_WARN_TOKENS = cfgmod.context_warn_tokens(CFG)
+HANDOFF = cfgmod.handoff_enabled(CFG)
 TRANSCRIPTS = CFG["worker"].get("transcripts_dir")
+BOARD = CFG.get("board") or {}
+IDLE_HOURS = float((CFG.get("cleanup") or {}).get("idle_hours") or 3)
 
 
 def die(msg, **extra):
@@ -140,7 +144,9 @@ def collect(fetch):
         # board.py's job, where they can be demoted when old.
         waiting = [(ag.get("lastAssistantMessage") or "").strip() for ag in agents
                    if ag.get("state") in board_rules.WAITING_STATES
-                   and board_rules.classify(board_rules.make_row(p, ag, now_ms))[0] == "needs_human"]
+                   and board_rules.classify(board_rules.make_row(p, ag, now_ms),
+                                            phrases=BOARD.get("decision_phrases") or (),
+                                            negations=BOARD.get("negations") or ())[0] == "needs_human"]
         ctx = None
         if exists:
             f = transcript.latest_transcript(path, TRANSCRIPTS)
@@ -280,7 +286,7 @@ def cmd_overlap(paths, fetch):
 def fmt_ctx(c):
     if not c:
         return "ctx -"
-    flag = "!" if c["pct"] >= CTX_WARN else " "
+    flag = "!" if c["tokens"] >= CTX_WARN_TOKENS else " "
     return f"ctx {c['tokens'] // 1000:>3}k {int(c['pct'] * 100):>3}%{flag}"
 
 
@@ -325,8 +331,14 @@ def cmd_context(rows, name):
             print(f"{r['name']:<32} no transcript found")
             continue
         print(f"{r['name']:<32} {fmt_ctx(c)}  {c['turns']} turns, {c['compactions']} compaction(s)  {c['file']}")
-    print(f"\nestimate against a {CTX_WINDOW // 1000}k window; '!' = over {int(CTX_WARN * 100)}% (worker.context_warn). "
-          f"Over the line: send the worker the wrap-up line, then spawn_worker.py --continue.")
+    print(f"\nestimate against a {CTX_WINDOW // 1000}k window; '!' = over {CTX_WARN_TOKENS // 1000}k "
+          f"({CTX_WARN_TOKENS * 100 // CTX_WINDOW}%, worker.context_warn).")
+    if HANDOFF:
+        msg = (CFG.get("handoff") or {}).get("wrap_up_message") or cfgmod.DEFAULTS["handoff"]["wrap_up_message"]
+        print(f"Over the line: orca terminal send --terminal <handle> --text {shlex.quote(msg)} --enter --wait-submit 15 --json, "
+              f"then spawn_worker.py --name <task> --continue.")
+    else:
+        print("handoff.enabled is false: flagged workers keep running and rely on the agent's own compaction.")
 
 
 def cmd_handoff(name):
@@ -367,7 +379,7 @@ def main():
     ov.add_argument("--no-fetch", action="store_true")
     cl = sub.add_parser("cleanup")
     cl.add_argument("--apply", metavar="NAMES", help="comma-separated worktree names; removes only these")
-    cl.add_argument("--idle-hours", type=float, default=3)
+    cl.add_argument("--idle-hours", type=float, default=IDLE_HOURS, help=f"default: cleanup.idle_hours ({IDLE_HOURS:g})")
     cl.add_argument("--no-fetch", action="store_true")
     cl.add_argument("--dry-run", action="store_true")
     a = p.parse_args()

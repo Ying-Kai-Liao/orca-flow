@@ -9,10 +9,47 @@ need to know your commands simply say "not configured" instead of guessing.
 3. `<repo>/orca-flow.json`
 4. `<git-common-dir>/orca-flow/config.json` — untracked, for values you don't want in the repo
 
+The local file (4) is also laid over whichever of 1-3 was found, key by key, so it can hold
+just the few values that are personal or secret while the rest stays in the committed file.
+
 In a repo that has never used the skill, run `python3 scripts/init.py` (below). Otherwise
-start one with `python3 scripts/config.py init`, check what resolved with
-`python3 scripts/config.py show`, and read a single value with
-`python3 scripts/config.py get worker.test_command`.
+start one with `python3 scripts/config.py init`.
+
+## Changing settings: `config.py`
+
+```
+config.py show [--json]            # the resolved config, defaults filled in
+config.py keys [--json]            # every key: current value, default, one-line description; * = set in a config file
+config.py get <key>                # one value; scalars print bare, for shell use
+config.py path                     # the files that were read, in order
+config.py set <key> <value> [--local] [--append] [--force] [--dry-run]
+config.py unset <key> [--local] [--dry-run]
+config.py check                    # type-check the files; exit 1 on errors
+```
+
+- **`set`** parses the value by the key's type: `true`/`false` (also yes/no, on/off),
+  numbers, JSON for lists and objects, `null` to clear. Strings need no quoting beyond the
+  shell's. It writes the file already in use, or `<repo>/orca-flow.json` if there is none,
+  and prints which file changed.
+- **`--local`** writes `<git-common-dir>/orca-flow/config.json` instead. Use it for personal
+  preferences (model, context limit, bypass) and for anything that mustn't be committed.
+  When a repo-file `set` is hidden by the local file, `set` says so.
+- **`--append`** adds one item to a list key: `set worker.checks "npm run lint" --append`.
+- **Unknown keys and wrong types are refused**, with a suggestion for a near miss, so a typo
+  can't silently do nothing. `--force` writes them anyway.
+- **`unset`** removes the key from that file, so the default (or the other file) applies again.
+- Changes apply to what starts afterwards. A running worker keeps the rules it was started
+  with; `spawn_worker.py --continue` re-renders them.
+
+Examples:
+```
+python3 scripts/config.py set handoff.enabled false                 # never wrap workers up for context
+python3 scripts/config.py set worker.context_window 1000000 --local # you run 1M-context models
+python3 scripts/config.py set worker.context_warn 400000 --local    # flag at 400k tokens instead of a fraction
+python3 scripts/config.py set board.stale_min 60
+python3 scripts/config.py set cleanup.idle_hours 12
+python3 scripts/config.py unset worker.model --local
+```
 
 **Which repo is "the repo":** when the skill lives inside a project (`.claude/skills/orca-flow`),
 its own location decides, so the caller's cwd doesn't matter. When it's installed standalone — a
@@ -40,9 +77,14 @@ overrides both.
 | `worker.extra_rules` | `[]` | Extra bullets appended to the worker rules. Project-specific traps go here. |
 | `worker.big_files` | `[]` | Files workers must never read whole; briefs give entry points with line ranges for them. |
 | `worker.big_file_lines` | `1500` | Above this many lines any file counts as big. |
-| `worker.context_window` | `200000` | Window the context estimate is measured against (`worktrees.py context`). |
-| `worker.context_warn` | `0.35` | Fraction of the window at which a worker is flagged and the manager wraps it up and `--continue`s it. |
+| `worker.context_window` | `200000` | Window the context estimate is measured against (`worktrees.py context`). Raise it for 1M-context models. |
+| `worker.context_warn` | `0.35` | Where a worker is flagged `!`: a fraction of the window (`<= 1`, e.g. `0.35`) or an absolute token count (`> 1`, e.g. `70000`). With handoff on, the manager then wraps it up and `--continue`s it. |
 | `worker.transcripts_dir` | `~/.claude/projects` | Where Claude Code writes session transcripts, if not the default (`$CLAUDE_CONFIG_DIR` is honoured). |
+| `worker.bypass_permissions` | `false` | Start workers with `bypassPermissions` without passing `--bypass` (`--no-bypass` overrides). Only for a manager that runs that way itself. |
+| `handoff.enabled` | `true` | Whether flagged workers are wrapped up and continued in a fresh session. `false`: they run to the end on the agent's own compaction, the worker rules drop the wrap-up section, and `--continue` is only for a worker that died. |
+| `handoff.digest` | `true` | Whether `--continue` writes `handoff-digest.md` from the old session's transcript. |
+| `handoff.wrap_up_message` | `"WRAP UP: commit WIP, push, …"` | The one line the manager sends a flagged worker. The worker rules quote the part before the colon, so keep a short prefix like `WRAP UP:`. |
+| `handoff.max_continues` | `2` | After this many `--continue`s of one package, `spawn_worker.py` adds a `warning`: the package is too big, split it. |
 | `merge_queue.enabled` | `true` | `false` for a repo with no queue session: the manager reviews and merges PRs itself, `handover.py send` refuses (unless `--force`), and `worktrees.py inventory` / `board.py` don't report open PRs as `unhanded_pr`. Only an explicit `false` turns it off. |
 | `merge_queue.merge_method` | `"squash"` | With no queue, how the manager merges: `gh pr merge <pr> --<method>` (`squash`, `merge` or `rebase`). |
 | `merge_queue.worktree_name` | `"merge-queue"` | The clean worktree the queue works from. |
@@ -55,6 +97,11 @@ overrides both.
 | `main_checkout.guard` | `true` | Whether the PreToolUse hook blocks edits to the main checkout. |
 | `main_checkout.allow_files` | `[]` | Files still editable there. `state_file` is added automatically. |
 | `main_checkout.allow_prefixes` | `[".claude/"]` | Path prefixes still editable there. |
+| `board.stale_min` | `30` | Minutes without an update before a working pane shows as `stale`. `board.py --stale-min` overrides. |
+| `board.question_max_min` | `240` | Minutes after which an unanswered question in an agent's message is demoted to `done`. |
+| `board.decision_phrases` | `[]` | Extra phrases (lowercase) that mark a last paragraph as asking the user to decide, added to the built-in English ones. For agents that write in another language. |
+| `board.negations` | `[]` | Extra negations (lowercase) that cancel a decision phrase right after them. |
+| `cleanup.idle_hours` | `3` | Idle hours before a worktree with no commits becomes a cleanup candidate. `worktrees.py cleanup --idle-hours` overrides. |
 
 ## First run: `init.py`
 
@@ -78,7 +125,7 @@ Idempotent; one line per step, each `ok`, `skipped (already …)` or `would (dry
    edit `merge_queue.enabled` by hand for that.) An existing file that isn't valid JSON is
    reported as `failed (invalid JSON)` and left alone, with or without `--force-config`.
 4. creates `<git-common-dir>/orca-flow/{briefs,queue,bin}`;
-5. prints `next:` with the values still null and whether the repo runs with or without a queue.
+5. prints `next:` with the values still null (fill them with `config.py set`) and whether the repo runs with or without a queue.
 
 Claude Code's "Quick safety check" trust is per exact directory, and every worktree is a new
 one, so `init.py` doesn't set it: `spawn_worker.py` marks each new worktree path as trusted in
@@ -144,6 +191,7 @@ next to the brief. Available placeholders:
 | `{{BIG_FILE_RULE}}` | the "don't read big files whole" rule, naming `worker.big_files` |
 | `{{STATE_FILE_RULE}}`, `{{STATE_FILE_INLINE}}` | "don't touch the status file", or nothing |
 | `{{EXTRA_RULES}}` | `worker.extra_rules`, one bullet each |
+| `{{HANDOFF_RULE}}` | the "Handing off and continuing" section (quoting `handoff.wrap_up_message`), or just the part about being a continued session when `handoff.enabled` is false |
 
 Check the result before spawning ten workers with it:
 ```
