@@ -156,6 +156,9 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
      If `handoff.enabled` is false, leave flagged workers alone; `--continue` is then only for
      a worker that died. A package continued more than `handoff.max_continues` times gets a
      `warning` in the output: it was too big, so split what's left.
+     With `handoff.bin` configured, send no wrap-up line (the working set is already current), but
+     stop the old session before step 3: `orca terminal close --terminal <handle> --json`, and only
+     then `--continue`, which refuses while Orca still shows an agent pane there (`--force` overrides).
 7. **Review each PR,** yourself or with a subagent. Send fixes as **one line**, because a
    newline can submit the text early:
    ```
