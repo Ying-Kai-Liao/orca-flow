@@ -101,6 +101,16 @@ DEFAULTS = {
         "wrap_up_message": "WRAP UP: commit WIP, push, write handoff.md next to the brief, set the card to HANDOFF, stop.",
         # A package continued more often than this was too big; --continue warns.
         "max_continues": 2,
+        # jev-handoff (a Stop hook that keeps a verbatim, intent-scored working set of each
+        # session's transcript). Off unless bin is set, so repos without it behave as before.
+        # Path to the jev-handoff entry point, e.g. ~/Workspace/jev-handoff/bin/jev-handoff.
+        "bin": None,
+        "state_dir": "~/.local/state/jev-handoff",
+        # Install the Stop hook into each worker worktree's .claude/settings.local.json.
+        # Per worktree because project hooks come from the session's own checkout.
+        "hook": True,
+        # Above this many lines a restarted worker is told to grep the working set, not read it.
+        "max_inline_lines": 150,
     },
     "merge_queue": {
         # false: a small repo with no queue session. The manager reviews and merges PRs itself,
@@ -175,6 +185,10 @@ SCHEMA = {
     "handoff.digest": (bool, "--continue writes handoff-digest.md from the old transcript."),
     "handoff.wrap_up_message": (str, "The line sent to a flagged worker; quoted in the worker rules."),
     "handoff.max_continues": (int, "--continue warns after this many continuations of one package."),
+    "handoff.bin": (str, "jev-handoff entry point; null = working set off."),
+    "handoff.state_dir": (str, "Where jev-handoff keeps each session's working set."),
+    "handoff.hook": (bool, "Install jev-handoff's Stop hook into each worker worktree."),
+    "handoff.max_inline_lines": (int, "Above this many lines a restarted worker greps the working set."),
     "merge_queue.enabled": (bool, "false: no queue session; the manager merges itself."),
     "merge_queue.merge_method": (str, "squash, merge or rebase (no-queue merges)."),
     "merge_queue.worktree_name": (str, "The clean worktree the queue works from."),
@@ -341,6 +355,17 @@ def context_warn_tokens(cfg):
     window = int(w.get("context_window") or 200000)
     warn = float(w.get("context_warn") or 0.35)
     return int(warn * window) if warn <= 1 else int(warn)
+
+
+def handoff_settings(cfg):
+    """The jev-handoff keys of handoff, with paths expanded; bin is None when the feature is
+    off. Only an explicit false turns the hook off."""
+    h = cfg.get("handoff") or {}
+    d = DEFAULTS["handoff"]
+    return {"bin": os.path.expanduser(h["bin"]) if h.get("bin") else None,
+            "state_dir": os.path.expanduser(h.get("state_dir") or d["state_dir"]),
+            "hook": h.get("hook") is not False,
+            "max_inline_lines": int(h.get("max_inline_lines") or d["max_inline_lines"])}
 
 
 def dig(cfg, dotted):

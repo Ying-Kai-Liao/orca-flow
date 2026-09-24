@@ -85,6 +85,10 @@ overrides both.
 | `handoff.digest` | `true` | Whether `--continue` writes `handoff-digest.md` from the old session's transcript. |
 | `handoff.wrap_up_message` | `"WRAP UP: commit WIP, push, …"` | The one line the manager sends a flagged worker. The worker rules quote the part before the colon, so keep a short prefix like `WRAP UP:`. |
 | `handoff.max_continues` | `2` | After this many `--continue`s of one package, `spawn_worker.py` adds a `warning`: the package is too big, split it. |
+| `handoff.bin` | none | Path to the [jev-handoff](https://github.com/Ying-Kai-Liao/jev-handoff) entry point, e.g. `~/Workspace/jev-handoff/bin/jev-handoff`. Unset, the feature is off and nothing below applies. |
+| `handoff.state_dir` | `~/.local/state/jev-handoff` | Where jev-handoff keeps each session's working set (`<state_dir>/<session_id>/handoff.md`). |
+| `handoff.hook` | `true` | Install jev-handoff's Stop hook into each worker worktree's `.claude/settings.local.json` (see below). |
+| `handoff.max_inline_lines` | `150` | A restarted worker whose working set is longer than this is told to grep it, not read it whole. |
 | `merge_queue.enabled` | `true` | `false` for a repo with no queue session: the manager reviews and merges PRs itself, `handover.py send` refuses (unless `--force`), and `worktrees.py inventory` / `board.py` don't report open PRs as `unhanded_pr`. Only an explicit `false` turns it off. |
 | `merge_queue.merge_method` | `"squash"` | With no queue, how the manager merges: `gh pr merge <pr> --<method>` (`squash`, `merge` or `rebase`). |
 | `merge_queue.worktree_name` | `"merge-queue"` | The clean worktree the queue works from. |
@@ -102,6 +106,23 @@ overrides both.
 | `board.decision_phrases` | `[]` | Extra phrases (lowercase) that mark a last paragraph as asking the user to decide, added to the built-in English ones. For agents that write in another language. |
 | `board.negations` | `[]` | Extra negations (lowercase) that cancel a decision phrase right after them. |
 | `cleanup.idle_hours` | `3` | Idle hours before a worktree with no commits becomes a cleanup candidate. `worktrees.py cleanup --idle-hours` overrides. |
+
+## jev-handoff working set (`handoff.*`)
+
+With `handoff.bin` set, `spawn_worker.py` runs `<bin> install-hook --settings
+<worktree>/.claude/settings.local.json` in every worktree it creates or continues, before the
+agent starts. Per worktree, because Claude Code reads project hooks from the session's own
+checkout and `settings.local.json` is not shared between checkouts. `worktrees.py cleanup` does
+not count that untracked file (or its `.bak`) as uncommitted work.
+
+`spawn_worker.py --continue` then takes the previous session id from the worktree's newest
+transcript, runs `<bin> run --transcript … --task "<brief title>"` (20 s timeout; failures are
+noted, not fatal; a dry run skips it and reads what is on disk), and, if
+`<state_dir>/<session_id>/handoff.md` exists, names it first in the new worker's prompt with
+reading rules (Trajectory plus the last two bunches; grep instead when it is over
+`max_inline_lines`). `handoff-digest.md` is still written, without its last messages. The
+JSON result carries `handoff: {path, items, bunches, age_s}`, or `handoff: null` and
+`handoff_reason`. `worktrees.py inventory` / `context` show the working set's age as `hf`.
 
 ## First run: `init.py`
 

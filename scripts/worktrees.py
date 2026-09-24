@@ -50,6 +50,12 @@ HANDOFF = cfgmod.handoff_enabled(CFG)
 TRANSCRIPTS = CFG["worker"].get("transcripts_dir")
 BOARD = CFG.get("board") or {}
 IDLE_HOURS = float((CFG.get("cleanup") or {}).get("idle_hours") or 3)
+HANDOFF_STATE = cfgmod.handoff_settings(CFG)["state_dir"]
+# Untracked files spawn_worker.py itself puts into a worktree (jev-handoff's Stop hook, and the
+# .bak install-hook keeps when the file already existed). Counting them as uncommitted work
+# would keep every worker worktree out of cleanup forever. Only untracked ("??") entries are
+# excused: a tracked settings file that changed is a real change.
+OWN_UNTRACKED = {".claude/settings.local.json", ".claude/settings.local.json.bak"}
 
 
 def die(msg, **extra):
@@ -83,6 +89,30 @@ def repo_context():
     if not repo:
         die(f"Orca has no repo at {repo_root}")
     return repo_root, repo["id"]
+
+
+def dirty_count(path):
+    """Uncommitted changes in a worktree, or None if git status fails. --untracked-files=all
+    because a new untracked .claude/ folder would otherwise show as one "?? .claude/" line
+    that can't be told apart from real work."""
+    code, out, _ = run(["git", "-C", path, "status", "--porcelain", "--untracked-files=all"])
+    if code:
+        return None
+    return len([l for l in out.splitlines()
+                if l.strip() and not (l.startswith("?? ") and l[3:].strip('"') in OWN_UNTRACKED)])
+
+
+def handoff_of(tfile, state_dir=None):
+    """The jev-handoff working set of the session that wrote tfile: {path, age_s}, or None.
+    A file read only; jev-handoff itself is never called from here."""
+    if not tfile:
+        return None
+    sid = os.path.splitext(os.path.basename(tfile))[0]
+    p = os.path.join(state_dir or HANDOFF_STATE, sid, "handoff.md")
+    try:
+        return {"path": p, "age_s": int(time.time() - os.path.getmtime(p))}
+    except OSError:
+        return None
 
 
 def collect(fetch):
@@ -121,8 +151,7 @@ def collect(fetch):
         dirty = ahead = None
         head = w.get("head")
         if exists:
-            code, out, _ = run(["git", "-C", path, "status", "--porcelain"])
-            dirty = len([l for l in out.splitlines() if l.strip()]) if code == 0 else None
+            dirty = dirty_count(path)
             code, out, _ = run(["git", "-C", path, "rev-parse", "HEAD"])
             if code == 0:
                 head = out
@@ -147,9 +176,10 @@ def collect(fetch):
                    and board_rules.classify(board_rules.make_row(p, ag, now_ms),
                                             phrases=BOARD.get("decision_phrases") or (),
                                             negations=BOARD.get("negations") or ())[0] == "needs_human"]
-        ctx = None
+        ctx = handoff = None
         if exists:
             f = transcript.latest_transcript(path, TRANSCRIPTS)
+            handoff = handoff_of(f)
             if f:
                 m = transcript.measure(f)
                 ctx = {"tokens": m["tokens_estimate"], "pct": round(m["tokens_estimate"] / CTX_WINDOW, 2),
@@ -161,6 +191,7 @@ def collect(fetch):
             "idle_hours": round((now_ms - last) / 3.6e6, 1) if last else None,
             "workspace_status": w.get("workspaceStatus"), "comment": w.get("comment") or "",
             "pr": pr, "pr_known": pr_ok, "waiting": waiting, "ctx": ctx,
+            "handoff": handoff,
         })
     return rows, notes
 
@@ -290,6 +321,14 @@ def fmt_ctx(c):
     return f"ctx {c['tokens'] // 1000:>3}k {int(c['pct'] * 100):>3}%{flag}"
 
 
+def fmt_hf(h):
+    """Age of the current session's jev-handoff working set: 3m, 2h, 1d, or - when none."""
+    if not h:
+        return "hf -"
+    s = max(0, h["age_s"])
+    return "hf " + (f"{s // 60}m" if s < 3600 else f"{s // 3600}h" if s < 86400 else f"{s // 86400}d")
+
+
 def unhanded_prs(repo_root):
     """Open, non-draft PRs with no handover file. The queue only sees what it's handed, so
     a finished PR can sit for days while everyone assumes it shipped."""
@@ -330,7 +369,7 @@ def cmd_context(rows, name):
         if not c:
             print(f"{r['name']:<32} no transcript found")
             continue
-        print(f"{r['name']:<32} {fmt_ctx(c)}  {c['turns']} turns, {c['compactions']} compaction(s)  {c['file']}")
+        print(f"{r['name']:<32} {fmt_ctx(c)} {fmt_hf(r['handoff']):<6} {c['turns']} turns, {c['compactions']} compaction(s)  {c['file']}")
     print(f"\nestimate against a {CTX_WINDOW // 1000}k window; '!' = over {CTX_WARN_TOKENS // 1000}k "
           f"({CTX_WARN_TOKENS * 100 // CTX_WINDOW}%, worker.context_warn).")
     if HANDOFF:
@@ -413,7 +452,7 @@ def main():
         for r in sorted(rows, key=lambda r: r["name"]):
             pr = f"#{r['pr']['number']} {r['pr']['state']}" if r["pr"] else ("on-base" if r["on_base"] else "-")
             print(f"{r['name']:<32} {str(r['status']):<10} {str(r['workspace_status']):<12} PR {pr:<12} "
-                  f"ahead {str(r['ahead']):<3} dirty {str(r['dirty']):<3} idle {str(r['idle_hours']):<5}h {fmt_ctx(r['ctx'])}  {r['comment']}")
+                  f"ahead {str(r['ahead']):<3} dirty {str(r['dirty']):<3} idle {str(r['idle_hours']):<5}h {fmt_ctx(r['ctx'])} {fmt_hf(r['handoff']):<6} {r['comment']}")
         waiting = [(r["name"], m) for r in rows for m in r["waiting"]]
         if waiting:
             print("\nWaiting on the user (an agent asked something and stopped):")
