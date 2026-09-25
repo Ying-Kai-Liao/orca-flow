@@ -49,7 +49,8 @@ CTX_WARN_TOKENS = cfgmod.context_warn_tokens(CFG)
 HANDOFF = cfgmod.handoff_enabled(CFG)
 TRANSCRIPTS = CFG["worker"].get("transcripts_dir")
 BOARD = CFG.get("board") or {}
-IDLE_HOURS = float((CFG.get("cleanup") or {}).get("idle_hours") or 3)
+_idle = (CFG.get("cleanup") or {}).get("idle_hours")
+IDLE_HOURS = float(3 if _idle is None else _idle)
 HANDOFF_STATE = cfgmod.handoff_settings(CFG)["state_dir"]
 # With no jev-handoff configured, inventory, context and cleanup behave exactly as before it
 # existed: no hf column, no untracked-file exception.
@@ -179,6 +180,8 @@ def collect(fetch):
         waiting = [(ag.get("lastAssistantMessage") or "").strip() for ag in agents
                    if ag.get("state") in board_rules.WAITING_STATES
                    and board_rules.classify(board_rules.make_row(p, ag, now_ms),
+                                            stale_min=BOARD.get("stale_min", board_rules.STALE_MIN),
+                                            question_max_min=BOARD.get("question_max_min", board_rules.QUESTION_MAX_MIN),
                                             phrases=BOARD.get("decision_phrases") or (),
                                             negations=BOARD.get("negations") or ())[0] == "needs_human"]
         ctx = handoff = None
@@ -384,7 +387,12 @@ def cmd_context(rows, name):
         print(f"{r['name']:<32} {fmt_ctx(c)}{hf_cell(r)}{c['turns']} turns, {c['compactions']} compaction(s)  {c['file']}")
     print(f"\nestimate against a {CTX_WINDOW // 1000}k window; '!' = over {CTX_WARN_TOKENS // 1000}k "
           f"({CTX_WARN_TOKENS * 100 // CTX_WINDOW}%, worker.context_warn).")
-    if HANDOFF:
+    if HANDOFF and cfgmod.handoff_settings(CFG)["bin"]:
+        # The jev-handoff working set is already current, so no wrap-up line; and --continue
+        # refuses while the old pane is still live, so close it first.
+        print("Over the line (handoff.bin is set, send no wrap-up line): orca terminal close --terminal <handle> --json, "
+              "then spawn_worker.py --name <task> --continue.")
+    elif HANDOFF:
         msg = (CFG.get("handoff") or {}).get("wrap_up_message") or cfgmod.DEFAULTS["handoff"]["wrap_up_message"]
         print(f"Over the line: orca terminal send --terminal <handle> --text {shlex.quote(msg)} --enter --wait-submit 15 --json, "
               f"then spawn_worker.py --name <task> --continue.")

@@ -37,7 +37,8 @@ python3 scripts/config.py set worker.checks "npm run lint" --append  # add one i
 python3 scripts/config.py unset <key> [--local]                     # back to the default
 python3 scripts/config.py check
 ```
-It writes the config file already in use (or `<repo>/orca-flow.json`). `--local` writes
+It writes the repo's config file (creating `<repo>/orca-flow.json` if there is none), never the
+local one, and `null` puts a key back to its default. `--local` writes
 `<git-common-dir>/orca-flow/config.json` instead: never committed, laid over the repo's file,
 so use it for personal preferences (model, context limit, bypass) or values that mustn't be
 committed. Tell the user which file changed. Changes reach workers started afterwards;
@@ -146,7 +147,8 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
      context use. When one is flagged `!` and `handoff.enabled` is true (the default), don't
      wait for it to finish on its own:
      1. send it the configured wrap-up line; `worktrees.py context` prints the exact
-        `orca terminal send` command with `handoff.wrap_up_message` filled in
+        `orca terminal send` command with `handoff.wrap_up_message` filled in (with
+        `handoff.bin` set it prints the close-then-continue steps below instead)
      2. wait for `worktrees.py status <task>` to print `handoff` (or the agent to go idle)
      3. `python3 scripts/spawn_worker.py --name <task> --continue [--note "<what to do first>"]`
         It writes `handoff-digest.md` from the old session's transcript (files edited, last
