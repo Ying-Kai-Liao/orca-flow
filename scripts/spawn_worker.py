@@ -573,7 +573,8 @@ def continue_worker(a, cfg, wt, brief_dir, brief_path, common_path, test_lock, a
         sys.exit(2)
     ho = cfg.get("handoff") or {}
     want_digest = ho.get("digest") is not False
-    tfile = transcript.latest_transcript(path, cfg["worker"].get("transcripts_dir")) if want_digest else None
+    # Found even without a digest: the manager's JSON reports it, and it's only a directory scan.
+    tfile = transcript.latest_transcript(path, cfg["worker"].get("transcripts_dir"))
     # jev-handoff's working set, when configured: named first, and the digest drops its last messages.
     ws = working_set_for(path, cfg, brief_title(brief_path), dry)
     digest_path = os.path.join(brief_dir, "handoff-digest.md")

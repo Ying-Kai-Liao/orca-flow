@@ -261,9 +261,11 @@ def common_dir(root=None):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def config_path(root=None, use_env=True):
+def config_path(root=None, use_env=True, include_local=True):
     """use_env=False skips $ORCA_FLOW_CONFIG: for callers that read other repos' configs
-    (board.py), where one repo's override must not stand in for every repo's file."""
+    (board.py), where one repo's override must not stand in for every repo's file.
+    include_local=False leaves out the untracked local file (candidate 4): `set` without
+    --local must write a file the team shares, even when only the local one exists yet."""
     root = root or repo_root()
     env = os.environ.get("ORCA_FLOW_CONFIG") if use_env else None
     if env:
@@ -271,7 +273,7 @@ def config_path(root=None, use_env=True):
     if not root:
         return None
     candidates = [os.path.join(root, ".claude", "orca-flow.json"), os.path.join(root, "orca-flow.json")]
-    cd = common_dir(root)
+    cd = common_dir(root) if include_local else None
     if cd:
         candidates.append(os.path.join(cd, "orca-flow", "config.json"))
     return next((c for c in candidates if os.path.isfile(c)), None)
@@ -308,6 +310,18 @@ def load_raw(root=None, use_env=True):
     return raw, files
 
 
+def fill_nulls(cfg, defaults):
+    """null in a config file means "not set" (it's what `config.py set <key> null` writes to
+    clear a value), so a key with a real default takes the default instead of None. Without
+    this, main_checkout.guard: null read as false and switched the guard off."""
+    for k, d in defaults.items():
+        if isinstance(d, dict) and isinstance(cfg.get(k), dict):
+            fill_nulls(cfg[k], d)
+        elif cfg.get(k) is None and d is not None:
+            cfg[k] = copy.deepcopy(d)
+    return cfg
+
+
 def merge(base, override):
     out = copy.deepcopy(base)
     for k, v in (override or {}).items():
@@ -319,7 +333,7 @@ def load(root=None):
     """Resolved config. Unknown keys are kept, so a project can carry its own notes."""
     root = root or repo_root()
     raw, files = load_raw(root)
-    cfg = merge(DEFAULTS, raw)
+    cfg = fill_nulls(merge(DEFAULTS, raw), DEFAULTS)
     cfg["repo_root"] = root
     cfg["config_file"] = files[0] if files else None
     cfg["config_files"] = files
@@ -352,8 +366,9 @@ def handoff_enabled(cfg):
 def context_warn_tokens(cfg):
     """worker.context_warn as a token count: a fraction of the window, or tokens as given."""
     w = cfg.get("worker") or {}
-    window = int(w.get("context_window") or 200000)
-    warn = float(w.get("context_warn") or 0.35)
+    d = DEFAULTS["worker"]
+    window = int(d["context_window"] if w.get("context_window") is None else w["context_window"])
+    warn = float(d["context_warn"] if w.get("context_warn") is None else w["context_warn"])
     return int(warn * window) if warn <= 1 else int(warn)
 
 
@@ -455,20 +470,26 @@ def type_errors(raw):
                     errors.append((key, f"expected {_type_name(t)}, got {json.dumps(v, ensure_ascii=False)}"))
                 elif key in CHOICES and v is not None and v not in CHOICES[key]:
                     errors.append((key, f"must be one of {', '.join(CHOICES[key])}"))
-            elif isinstance(v, dict) and isinstance(dig(DEFAULTS, key), dict):
-                walk(v, key + ".")
+            elif isinstance(dig(DEFAULTS, key), dict):
+                if isinstance(v, dict):
+                    walk(v, key + ".")
+                elif v is not None:
+                    errors.append((key, f"must be an object of settings, got {json.dumps(v, ensure_ascii=False)}"))
             else:
                 notes.append((key, "unknown key (kept, but nothing reads it)"))
 
     walk(raw, "")
-    w = raw.get("worker") or {}
+    # A section that isn't an object was reported by walk(); read it as empty from here on.
+    w = raw.get("worker") if isinstance(raw.get("worker"), dict) else {}
+    mq = raw.get("merge_queue") if isinstance(raw.get("merge_queue"), dict) else {}
     cw = w.get("context_warn")
     if isinstance(cw, (int, float)) and not isinstance(cw, bool):
         if cw <= 0:
             errors.append(("worker.context_warn", "must be above 0"))
         elif cw > 1 and cw != int(cw):
             errors.append(("worker.context_warn", "a fraction (<= 1) or a whole token count (> 1), not " + str(cw)))
-    for i, t in enumerate((raw.get("merge_queue") or {}).get("targets") or []):
+    targets = mq.get("targets") if isinstance(mq.get("targets"), list) else []
+    for i, t in enumerate(targets):
         if not isinstance(t, dict) or not t.get("name") or not isinstance(t.get("deploy"), list):
             errors.append((f"merge_queue.targets[{i}]", 'needs a "name" and a "deploy" list'))
     return errors, notes
@@ -496,7 +517,7 @@ def write_target(root, local):
     """The file `set`/`unset` edits."""
     if local:
         return local_path(root)
-    return config_path(root) or os.path.join(root, "orca-flow.json")
+    return config_path(root, include_local=False) or os.path.join(root, "orca-flow.json")
 
 
 def dump_json(data):

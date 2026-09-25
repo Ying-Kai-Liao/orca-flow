@@ -29,12 +29,15 @@ config.py check                    # type-check the files; exit 1 on errors
 
 - **`set`** parses the value by the key's type: `true`/`false` (also yes/no, on/off),
   numbers, JSON for lists and objects, `null` to clear. Strings need no quoting beyond the
-  shell's. It writes the file already in use, or `<repo>/orca-flow.json` if there is none,
-  and prints which file changed.
+  shell's. A `null` (or missing) key takes its default. It writes the repo's config file
+  (`$ORCA_FLOW_CONFIG`, `.claude/orca-flow.json` or `orca-flow.json`, whichever exists), or
+  creates `<repo>/orca-flow.json`, never the local file, and prints which file changed.
 - **`--local`** writes `<git-common-dir>/orca-flow/config.json` instead. Use it for personal
   preferences (model, context limit, bypass) and for anything that mustn't be committed.
   When a repo-file `set` is hidden by the local file, `set` says so.
 - **`--append`** adds one item to a list key: `set worker.checks "npm run lint" --append`.
+- **`check`** also fails on a section that isn't an object (`"board": [1]`), which the
+  scripts can't read.
 - **Unknown keys and wrong types are refused**, with a suggestion for a near miss, so a typo
   can't silently do nothing. `--force` writes them anyway.
 - **`unset`** removes the key from that file, so the default (or the other file) applies again.

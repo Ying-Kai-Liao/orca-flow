@@ -136,6 +136,34 @@ class SetTest(ConfigTestBase):
         self.assertFalse(os.path.exists(os.path.join(self.root, "orca-flow.json")))
 
 
+class ReviewFixesTest(ConfigTestBase):
+    def test_null_takes_the_default(self):
+        self.cli("set", "main_checkout.guard", "null")
+        self.cli("set", "cleanup.idle_hours", "null")
+        cfg = cfgmod.load()
+        self.assertIs(cfg["main_checkout"]["guard"], True)
+        self.assertEqual(cfg["cleanup"]["idle_hours"], 3)
+        self.assertIsNone(cfg["worker"]["test_command"])  # a null default stays null
+
+    def test_plain_set_never_writes_the_local_file(self):
+        self.cli("set", "worker.model", "sonnet", "--local")
+        self.cli("set", "language", "French")
+        self.assertEqual(self.read(self.local), {"worker": {"model": "sonnet"}})
+        self.assertEqual(self.read(os.path.join(self.root, "orca-flow.json")), {"language": "French"})
+
+    def test_check_fails_on_a_section_that_is_not_an_object(self):
+        self.write(os.path.join(self.root, "orca-flow.json"), {"board": [1], "worker": "x"})
+        code, out = self.cli("check")
+        self.assertEqual(code, 1)
+        self.assertIn("error: board: must be an object", out)
+        self.assertIn("error: worker: must be an object", out)
+
+    def test_zero_is_a_value(self):
+        cfg = cfgmod.load()
+        cfg["worker"]["context_warn"] = 0
+        self.assertEqual(cfgmod.context_warn_tokens(cfg), 0)
+
+
 class CheckTest(ConfigTestBase):
     def test_check_reports_errors_and_unknown_keys(self):
         self.write(os.path.join(self.root, "orca-flow.json"),
