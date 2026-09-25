@@ -1,0 +1,12 @@
+{
+  "merge_queue": {
+    "enabled": false,
+    "merge_method": "squash"
+  },
+  "worker": {
+    "test_command": "python3 -m unittest {files}",
+    "full_check_command": "python3 -m unittest discover -s tests"
+  },
+  "language": "English",
+  "base_branch": "origin/main"
+}
