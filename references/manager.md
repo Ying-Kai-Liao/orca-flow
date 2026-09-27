@@ -167,11 +167,21 @@ keep going on the agent's own compaction. The queue retires itself after
 python3 scripts/handover.py queue show        # queue/state.json: the registered session, since when, batches done
 ```
 If `active` is set, a queue is registered: hand the PR over (next section) and, if you want it
-picked up now rather than at the queue's next look, `--notify` its terminal handle. If `active`
-is null, check the old way before starting one, because a queue may be running unregistered:
-ListAgents (a session whose name or summary mentions merge, deploy or queue), `orca worktree ps
---json` (comments and prompts), `orca terminal list --json` (a terminal titled merge-queue). If
-you find one, tell it to run `handover.py queue start`. Start a new queue only if none exists.
+picked up now rather than at the queue's next look, `--notify` its terminal handle.
+
+If no queue is registered, or its terminal is gone, start one:
+```
+python3 scripts/spawn_queue.py --dry-run      # what it would do; then without --dry-run (Bash timeout 600000)
+```
+It refuses while a live queue is registered, and it retires a gone one by itself. It also
+refuses while any agent runs in the queue worktree unregistered (a queue that hasn't run
+`handover.py queue start` yet): tell that one to run it instead of starting another.
+
+If the board flags the queue `hidden` (`queue:<session>`: Orca reports its terminal orphaned,
+so it runs, and may still merge, with no pane anyone can see), show the user and ask before
+running `spawn_queue.py --replace`: it closes the old terminal, whose scrollback is lost, then
+retires it and starts a fresh queue. Never bring a queue back with `claude --resume` in a
+shell; that is how it lost its pane.
 
 ## Handing a PR over
 

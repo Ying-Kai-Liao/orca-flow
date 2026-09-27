@@ -83,7 +83,7 @@ overrides both.
 | `worker.context_window` | `200000` | Window the context estimate is measured against (`worktrees.py context`). Raise it for 1M-context models. |
 | `worker.context_warn` | `0.35` | Where a worker is flagged `!`: a fraction of the window (`<= 1`, e.g. `0.35`) or an absolute token count (`> 1`, e.g. `70000`). With handoff on, the manager then wraps it up and `--continue`s it. |
 | `worker.transcripts_dir` | `~/.claude/projects` | Where Claude Code writes session transcripts, if not the default (`$CLAUDE_CONFIG_DIR` is honoured). |
-| `worker.bypass_permissions` | `false` | Start workers with `bypassPermissions` without passing `--bypass` (`--no-bypass` overrides). Only for a manager that runs that way itself. |
+| `worker.bypass_permissions` | `false` | Start workers, and the queue session `spawn_queue.py` starts, with `bypassPermissions` without passing `--bypass` (`--no-bypass` overrides). Only for a manager that runs that way itself. |
 | `manager.model` | `"opus"` | Model for managers started by `spawn_manager.py`. `--model` overrides it. |
 | `manager.bypass_permissions` | `false` | Start managers with `bypassPermissions` without passing `--bypass` (`--no-bypass` overrides). Only for a dispatcher that runs that way itself. |
 | `sources` | `{}` | Task sources for the dispatcher: source name -> path of the source's markdown doc, relative to the repo, e.g. `{"asana": ".claude/skills/asana-task/SKILL.md"}`. The doc's required sections are in `references/sources.md`. |
@@ -98,6 +98,7 @@ overrides both.
 | `merge_queue.enabled` | `true` | `false` for a repo with no queue session: the manager reviews and merges PRs itself, `handover.py send` refuses (unless `--force`), and `worktrees.py inventory` / `board.py` don't report open PRs as `unhanded_pr`. Only an explicit `false` turns it off. |
 | `merge_queue.merge_method` | `"squash"` | With no queue, how the manager merges: `gh pr merge <pr> --<method>` (`squash`, `merge` or `rebase`). |
 | `merge_queue.worktree_name` | `"merge-queue"` | The clean worktree the queue works from. |
+| `merge_queue.model` | `"opus"` | Model for the queue session `spawn_queue.py` starts. `--model` overrides it; a Fable model is refused. |
 | `merge_queue.state_file` | none | A hand-written status file only the queue may edit (e.g. `NOW.md`). Workers are told to leave it alone, and the main-checkout guard allows it. |
 | `merge_queue.targets` | `[]` | Deploy targets, in order (below). |
 | `merge_queue.rotate_after` | `10` | Batches after which `handover.py list` tells the queue to retire and a fresh session takes over. |
