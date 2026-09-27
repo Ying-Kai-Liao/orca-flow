@@ -8,7 +8,7 @@ review. So this reads PR state, working-tree cleanliness and agent activity toge
 always comes from git, never from Orca's cache, which lags behind the branch.
 
 Usage:
-  worktrees.py inventory [--json] [--no-fetch]   # one line per worktree, then: agents waiting on the user, open PRs nobody handed over
+  worktrees.py inventory [--json] [--no-fetch]   # one line per worktree grouped by manager, the merge queue, then: agents waiting on the user, open PRs nobody handed over
   worktrees.py status <name>          # one word: in-review / blocked / handoff / other workspaceStatus; for Monitor loops
   worktrees.py context [<name>]       # context estimate per worker session, flags the ones over worker.context_warn
   worktrees.py handoff <name>         # write briefs/<name>/handoff-digest.md from the worker's transcript and print it
@@ -35,6 +35,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import board_rules  # noqa: E402
 import config as cfgmod  # noqa: E402
+import handover as handovermod  # noqa: E402
+import managers as mgrmod  # noqa: E402
 import transcript  # noqa: E402
 
 ORCA = os.environ.get("ORCA_CLI_COMMAND", "orca")
@@ -376,6 +378,64 @@ def pr_row(u, no_queue=False):
             "state": None, "comment": "", "no_queue": no_queue}
 
 
+def live_terminals(notes):
+    """managers.terminal_index of `orca terminal list`, or None with a note: unlike orca(),
+    a failure here must not stop the inventory, it only leaves liveness unknown."""
+    code, out, err = run([ORCA, "terminal", "list", "--limit", "1000", "--json"])
+    try:
+        data = json.loads(out)
+    except ValueError:
+        data = {}
+    if code or not data.get("ok"):
+        notes.append(f"orca terminal list failed, manager and queue terminals not checked: {(err or out)[-200:]}")
+        return None
+    return mgrmod.terminal_index((data.get("result") or {}).get("terminals"))
+
+
+def manager_word(m):
+    """live / hidden / dead / gone / done / ? for a manager header. dead is a managers/
+    record that never said done; gone is an interactive manager whose session ended, which
+    is normal."""
+    if m.get("recorded") and m.get("status") == mgrmod.DONE:
+        return "done"
+    state = m.get("terminal_state")
+    if state is None:
+        return "?"
+    if state == "gone":
+        return "dead" if mgrmod.is_dead(m) else "gone"
+    return state
+
+
+def manager_header(m):
+    src = f"{m['source']}:{m['source_id'] or '-'}" if m.get("source") else "-"
+    return (f"{m['name']}  {m.get('status') or '-'}  {src}  {manager_word(m)}  {m.get('terminal') or '-'}"
+            + ("" if m["recorded"] else "  (no managers/ record)"))
+
+
+def queue_line(common, terminals, notes):
+    """(line, json) for the repo's registered merge queue, read with handover.py's own
+    state reader. (None, None) when no queue is registered."""
+    try:
+        act = (handovermod.read_state(common) or {}).get("active") if common else None
+    except (OSError, ValueError) as e:
+        notes.append(f"queue/state.json unreadable ({e.__class__.__name__}); merge queue not shown")
+        return None, None
+    if not isinstance(act, dict):
+        return None, None
+    state = mgrmod.terminal_state(act.get("terminal"), terminals)
+    word = state or "?"
+    info = {"session": act.get("session"), "terminal": act.get("terminal"), "batches": act.get("batches", 0),
+            "started_at": act.get("started_at"), "terminal_state": state}
+    return (f"merge queue: {act.get('session') or '-'}  batches {info['batches']}  {word}  "
+            f"{act.get('terminal') or '-'}"), info
+
+
+def fmt_inventory_row(r, indent=""):
+    pr = f"#{r['pr']['number']} {r['pr']['state']}" if r["pr"] else ("on-base" if r["on_base"] else "-")
+    return (f"{indent}{r['name']:<32} {str(r['status']):<10} {str(r['workspace_status']):<12} PR {pr:<12} "
+            f"ahead {str(r['ahead']):<3} dirty {str(r['dirty']):<3} idle {str(r['idle_hours']):<5}h {fmt_ctx(r['ctx'])}{hf_cell(r)}{r['comment']}")
+
+
 def cmd_context(rows, name):
     for r in sorted(rows, key=lambda r: -(r["ctx"] or {}).get("pct", -1)):
         if name and r["name"] != name:
@@ -465,14 +525,40 @@ def main():
         repo_root, _ = repo_context()
         unhanded = unhanded_prs(repo_root)
         no_queue = not cfgmod.queue_enabled(CFG)
+        common = cfgmod.common_dir(repo_root)
+        mnotes = []
+        terminals = live_terminals(mnotes)
+        managers, owner_of = mgrmod.assign(common, [r["name"] for r in rows], terminals, mnotes)
+        for r in rows:
+            r["manager"] = owner_of.get(r["name"])
+        qline, qinfo = queue_line(common, terminals, mnotes)
         if a.json:
-            print(json.dumps({"worktrees": rows, "open_prs": unhanded, "merge_queue": not no_queue},
+            print(json.dumps({"worktrees": rows, "open_prs": unhanded, "merge_queue": not no_queue,
+                              "managers": managers, "queue": qinfo, "notes": notes + mnotes},
                              ensure_ascii=False, indent=1))
             return
-        for r in sorted(rows, key=lambda r: r["name"]):
-            pr = f"#{r['pr']['number']} {r['pr']['state']}" if r["pr"] else ("on-base" if r["on_base"] else "-")
-            print(f"{r['name']:<32} {str(r['status']):<10} {str(r['workspace_status']):<12} PR {pr:<12} "
-                  f"ahead {str(r['ahead']):<3} dirty {str(r['dirty']):<3} idle {str(r['idle_hours']):<5}h {fmt_ctx(r['ctx'])}{hf_cell(r)}{r['comment']}")
+        for n in mnotes:
+            print(f"! {n}")
+        ordered = sorted(rows, key=lambda r: r["name"])
+        if not managers:
+            # No manager anywhere: the same flat list as before managers existed.
+            for r in ordered:
+                print(fmt_inventory_row(r))
+        else:
+            for m in managers:
+                print(f"\n{manager_header(m)}")
+                mine = [r for r in ordered if r["manager"] == m["name"]]
+                for r in mine:
+                    print(fmt_inventory_row(r, "  "))
+                if not mine:
+                    print("  (no workers)")
+            loose = [r for r in ordered if r["manager"] is None]
+            if loose:
+                print("\n(no manager)")
+                for r in loose:
+                    print(fmt_inventory_row(r, "  "))
+        if qline:
+            print(f"\n{qline}")
         waiting = [(r["name"], m) for r in rows for m in r["waiting"]]
         if waiting:
             print("\nWaiting on the user (an agent asked something and stopped):")

@@ -89,14 +89,19 @@ def write(pr, data):
                             "by": data.get("last_by")}, ensure_ascii=False) + "\n")
 
 
-def state_path():
+def state_path(common=None):
+    # With common (another repo's git common dir): board.py reads every repo's queue and must
+    # not create folders, which queue_dir() does.
+    if common:
+        return os.path.join(common, "orca-flow", "queue", "state.json")
     return os.path.join(queue_dir(), "state.json")
 
 
-def read_state():
-    if not os.path.isfile(state_path()):
+def read_state(common=None):
+    p = state_path(common)
+    if not os.path.isfile(p):
         return {"active": None, "retired": []}
-    with open(state_path(), encoding="utf-8") as f:
+    with open(p, encoding="utf-8") as f:
         return json.load(f)
 
 

@@ -6,8 +6,8 @@ nobody noticed the worker was done; a worker asking a decision in prose looks ex
 worker that finished. `orca worktree ps` has the raw state; this adds a derived `attention`
 per pane (board_rules.classify) and sorts so what needs a person comes first.
 
-It only reads: `orca worktree ps`, `orca repo list`, `gh pr list` and the handover queue
-files. It never writes to Orca. Polling only, since Orca has no event stream.
+It only reads: `orca worktree ps`, `orca repo list`, `orca terminal list`, `gh pr list`, the
+handover queue files and the manager records (managers.py). It never writes to Orca. Polling only, since Orca has no event stream.
 
 Usage:
   board.py [--json] [--repo <name>] [--stale-min N] [--question-max-min N] [--no-gh]
@@ -28,6 +28,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import board_rules  # noqa: E402
 import config as cfgmod  # noqa: E402
+import handover as handovermod  # noqa: E402
+import managers as mgrmod  # noqa: E402
 
 ORCA = os.environ.get("ORCA_CLI_COMMAND", "orca")
 # Branches a PR is never opened from; skipping them saves a gh call per untouched repo.
@@ -122,6 +124,29 @@ def repo_queue_enabled(root):
     return not repo_settings(root)["no_queue"]
 
 
+def queue_active(common, notes):
+    """The repo's registered merge queue ({session, terminal, batches, ...}) or None."""
+    if not common:
+        return None
+    try:
+        st = handovermod.read_state(common)
+    except (OSError, ValueError) as e:
+        notes.append(f"skipped {handovermod.state_path(common)}: unreadable ({e.__class__.__name__})")
+        return None
+    act = st.get("active") if isinstance(st, dict) else None
+    return act if isinstance(act, dict) else None
+
+
+def terminals_or_note(notes):
+    """terminal_index of `orca terminal list`, or None (with a note) when Orca can't answer:
+    liveness is then unknown, which must not read as "every manager died"."""
+    try:
+        return mgrmod.terminal_index(orca("terminal", "list", "--limit", "1000").get("terminals"))
+    except OrcaError as e:
+        notes.append(f"orca terminal list failed, manager and queue terminals not checked: {e}")
+        return None
+
+
 def collect(stale_min=None, repo_filter=None, use_gh=True, question_max_min=None):
     """(rows, notes). Rows are already classified and sorted. stale_min / question_max_min
     override every repo's board.* config; None uses each repo's own (or the defaults)."""
@@ -151,8 +176,27 @@ def collect(stale_min=None, repo_filter=None, use_gh=True, question_max_min=None
             if prs[repo_id] is None:
                 notes.append(f"gh pr list failed for {repo.get('displayName') or root}; using Orca's linked PR")
 
+    queues = {rid: queue_active(c, notes) for rid, c in commons.items()}
+    # One terminal list for the whole board, and only when some repo has something to check
+    # against it: most repos have neither managers nor a registered queue.
+    wanted = any(q and q.get("terminal") for q in queues.values()) or any(
+        c and os.path.isdir(os.path.join(c, "orca-flow", "managers")) for c in commons.values())
+    terminals = terminals_or_note(notes) if wanted else None
+    mgrs, owner_of = {}, {}
+    for rid, c in commons.items():
+        tasks = [os.path.basename((w.get("path") or "").rstrip("/")) for w in by_repo[rid] if not w.get("isMainWorktree")]
+        mgrs[rid], owner_of[rid] = mgrmod.assign(c, tasks, terminals, notes)
+
     now_ms = time.time() * 1000
     rows = []
+
+    def classified(row, st):
+        row["attention"], row["reason"] = board_rules.classify(
+            row, stale_min=st["stale_min"] if stale_min is None else stale_min,
+            question_max_min=st["question_max_min"] if question_max_min is None else question_max_min,
+            phrases=st.get("decision_phrases") or (), negations=st.get("negations") or ())
+        return row
+
     for w in worktrees:
         branch = (w.get("branch") or "").removeprefix("refs/heads/")
         pr = None
@@ -170,19 +214,67 @@ def collect(stale_min=None, repo_filter=None, use_gh=True, question_max_min=None
         # A worktree with no agent pane still gets one row: a BLOCKED card or an unhanded PR
         # matters whether or not a session is open on it.
         st = settings.get(w.get("repoId")) or {"no_queue": False, **cfgmod.DEFAULTS["board"]}
+        owner = None if w.get("isMainWorktree") else (owner_of.get(w.get("repoId")) or {}).get(
+            os.path.basename((w.get("path") or "").rstrip("/")))
         for ag in (w.get("agents") or [None]):
-            row = board_rules.make_row(w, ag, now_ms, pr=pr, handover=handover, no_queue=st["no_queue"])
-            row["attention"], row["reason"] = board_rules.classify(
-                row, stale_min=st["stale_min"] if stale_min is None else stale_min,
-                question_max_min=st["question_max_min"] if question_max_min is None else question_max_min,
-                phrases=st.get("decision_phrases") or (), negations=st.get("negations") or ())
+            row = board_rules.make_row(w, ag, now_ms, pr=pr, handover=handover, no_queue=st["no_queue"],
+                                       manager=owner)
             row["label"] = row["worktree"] or "?"
             if len(w.get("agents") or []) > 1:
                 # Several panes in one worktree (the main checkout often has a dozen) would
                 # otherwise print as identical rows.
                 row["label"] += "@" + short_pane(row["pane"])
             rows.append(row)
+
+    for rid in commons:
+        add_role_rows(rows, by_repo[rid], mgrs[rid], queues[rid], terminals, now_ms)
+    for row in rows:
+        classified(row, settings.get(row["repo_id"]) or {"no_queue": False, **cfgmod.DEFAULTS["board"]})
     return sort_rows(rows), notes
+
+
+def role_targets(managers, queue, terminals):
+    """(label, role) for each terminal the board checks: every managers/ record that isn't
+    done, and the registered merge queue. Nothing when Orca's terminal list is unknown."""
+    if terminals is None:
+        return []
+    out = []
+    for m in managers:
+        if m["recorded"] and m.get("status") != mgrmod.DONE:
+            out.append((f"manager:{m['slug']}", {"kind": "manager", "name": m["slug"], "status": m.get("status"),
+                                                  "terminal": m.get("terminal"), "terminal_state": m["terminal_state"]}))
+    if queue and queue.get("terminal"):
+        name = queue.get("session") or queue["terminal"]
+        out.append((f"queue:{name}", {"kind": "queue", "name": name, "status": None, "terminal": queue["terminal"],
+                                      "terminal_state": mgrmod.terminal_state(queue["terminal"], terminals)}))
+    return out
+
+
+def add_role_rows(rows, wts, managers, queue, terminals, now_ms):
+    """Tie managers' and the queue's terminals to the board. A manager runs in the main
+    checkout, where its pane would otherwise show as main@xxxx: that pane is found through
+    the terminal list (handle -> tabId:leafId == the pane's paneKey) and labelled
+    manager:<slug>. A terminal with no pane row still needs to be seen (it died, or it is
+    orphaned and runs where nobody can see it), so it gets a row of its own. The queue
+    only gets a row when it is hidden; its own worktree already shows it otherwise."""
+    by_pane = {r["pane"]: r for r in rows if r["pane"] and r["worktree_id"] in {w.get("worktreeId") for w in wts}}
+    main = next((w for w in wts if w.get("isMainWorktree")), wts[0])
+    for label, role in role_targets(managers, queue, terminals):
+        pane = (terminals.get(role["terminal"]) or {}).get("pane")
+        row = by_pane.get(pane) if pane else None
+        if row is not None:
+            row["role"] = role
+            if role["kind"] == "manager":
+                row["label"] = label
+            continue
+        if role["kind"] == "queue" and role["terminal_state"] != "hidden":
+            continue
+        # Only the repo's identity from the main worktree: its card comment or PR belongs to
+        # the checkout, not to this terminal.
+        base = {k: main.get(k) for k in ("hostId", "repo", "repoId", "worktreeId", "path", "branch")}
+        row = board_rules.make_row({**base, "isMainWorktree": True}, None, now_ms, role=role)
+        row["label"] = label
+        rows.append(row)
 
 
 def short_pane(key):
@@ -220,7 +312,8 @@ def fmt_row(r):
         # The question sits at the end of the message, not in its first line.
         msg = "…" + r["last_message_tail"].replace("\n", " ")[-80:]
     comment = f"  [{r['comment'][:50]}]" if r["comment"] else ""
-    return (f"  {r['attention']:<12} {str(r.get('label') or r['worktree']):<28} {str(r['state'] or '-'):<8} {fmt_min(r['minutes_in_state']):>6} "
+    mgr = str(r.get("manager") or "-")[:20]
+    return (f"  {r['attention']:<12} {str(r.get('label') or r['worktree']):<28} {mgr:<20} {str(r['state'] or '-'):<8} {fmt_min(r['minutes_in_state']):>6} "
             f"PR {pr:<12} {r['reason']}{comment}" + (f"\n{'':<15}» {msg}" if msg else ""))
 
 
@@ -284,7 +377,10 @@ def watch(a):
                 continue
             if a.write:
                 write_board(rows, notes)
-            cur = {(r["worktree_id"], r["pane"]): r for r in rows}
+            # A manager's or the queue's own row has no pane, and several can sit in one main
+            # checkout: those are told apart by label. A pane row keeps its pane as the key, so
+            # a relabel (main@xxxx -> manager:<slug>) isn't reported as gone + new.
+            cur = {(r["worktree_id"], r["pane"] or r.get("label")): r for r in rows}
             if prev is None:
                 print(f"{stamp()} board, {len(rows)} rows")
                 for n in notes:
