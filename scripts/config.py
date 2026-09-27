@@ -156,6 +156,10 @@ DEFAULTS = {
     "cleanup": {
         # A worktree with no commits counts as abandoned after this many idle hours.
         "idle_hours": 3,
+        # true: managers run `worktrees.py cleanup --auto` after each PR they merge or see
+        # deployed, and the queue after each deployed batch, without asking the user. false:
+        # --auto only runs when the user asks for it.
+        "auto": False,
     },
     # Manager sessions started by spawn_manager.py in the main checkout, one per task.
     "manager": {
@@ -215,6 +219,7 @@ SCHEMA = {
     "board.decision_phrases": (list, "Extra phrases that ask the user to decide (lowercase)."),
     "board.negations": (list, "Extra negations that cancel a decision phrase (lowercase)."),
     "cleanup.idle_hours": ((int, float), "Idle hours before a worktree with no commits is a cleanup candidate."),
+    "cleanup.auto": (bool, "Run cleanup --auto after each merge/deploy without asking."),
     "manager.model": (str, "Model for managers started by spawn_manager.py (--model overrides)."),
     "manager.bypass_permissions": (bool, "Start managers with bypassPermissions by default."),
     "sources": (dict, "Task sources: name -> repo-relative path of the source's doc."),

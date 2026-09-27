@@ -15,6 +15,7 @@ Usage:
   worktrees.py overlap <path...>      # open PRs / worktrees touching these paths, plus migration numbers already taken
   worktrees.py cleanup [--idle-hours N] [--no-fetch]   # N defaults to cleanup.idle_hours (3)
   worktrees.py cleanup --apply a,b [--dry-run]   # removes only the named ones that are still candidates
+  worktrees.py cleanup --auto [--dry-run]        # removes every candidate and closes finished manager terminals
 
 "Merged" is judged three ways, because a worktree's branch name is not reliable: the PR
 found by branch name, else a PR whose head equals the worktree's HEAD, else HEAD already
@@ -23,6 +24,11 @@ being an ancestor of the base branch (a renamed branch or a detached HEAD after 
 last output: an open shell prompt repaints constantly and made every worktree look busy.
 
 Kept regardless: the merge queue's worktree, anything in keep_worktrees, and $ORCA_FLOW_KEEP.
+
+--auto acts without a list for the user: it removes exactly what `cleanup` would list as
+REMOVABLE (the same decide()), and closes a manager's terminal only when
+managers.safe_to_close() proves it finished and unimportant. Only for when the user asked
+for it or cleanup.auto is true; see references/manager.md, Cleanup.
 """
 import argparse
 import json
@@ -124,6 +130,8 @@ def handoff_of(tfile, state_dir=None):
 
 
 def collect(fetch):
+    """(rows, notes, seen). seen keeps what collect already asked Orca and gh, for cleanup
+    --auto: {"ps": `orca worktree ps` worktrees, "prs": gh's PR list, or None when gh failed}."""
     repo_root, repo_id = repo_context()
     notes = []
     if fetch:
@@ -132,7 +140,8 @@ def collect(fetch):
             notes.append(f"git fetch failed, {BASE} may be stale: {err[-200:]}")
 
     worktrees = orca("worktree", "list", "--repo", f"id:{repo_id}").get("worktrees", [])
-    ps = {w.get("worktreeId"): w for w in orca("worktree", "ps").get("worktrees", [])}
+    ps_list = orca("worktree", "ps").get("worktrees", [])
+    ps = {w.get("worktreeId"): w for w in ps_list}
 
     prs = {}
     code, out, err = run(["gh", "pr", "list", "--state", "all", "--limit", "200",
@@ -141,8 +150,9 @@ def collect(fetch):
     if not pr_ok:
         notes.append(f"gh pr list failed, PR state unknown (so nothing will be a cleanup candidate): {err[-200:]}")
     by_head = {}
+    pr_list = json.loads(out) if pr_ok else None
     if pr_ok:
-        for pr in json.loads(out):
+        for pr in pr_list:
             prev = prs.get(pr["headRefName"])
             if prev is None or pr["number"] > prev["number"]:
                 prs[pr["headRefName"]] = pr
@@ -203,7 +213,7 @@ def collect(fetch):
             "pr": pr, "pr_known": pr_ok, "waiting": waiting, "ctx": ctx,
             **({"handoff": handoff} if HANDOFF_BIN else {}),
         })
-    return rows, notes
+    return rows, notes, {"ps": ps_list, "prs": pr_list}
 
 
 def decide(r, idle_hours):
@@ -392,12 +402,134 @@ def live_terminals(notes):
     return mgrmod.terminal_index((data.get("result") or {}).get("terminals"))
 
 
+def pr_of_task(task, rows_by_name, pr_list):
+    """The PR of a worker's task: its worktree row's PR while the worktree exists; after that,
+    the newest PR whose branch is <task> or ends in /<task> (spawn_worker.py names branches
+    <gitUsername>/<task>). None when nothing matches."""
+    r = rows_by_name.get(task)
+    if r is not None:
+        return r["pr"]
+    hits = [pr for pr in pr_list or [] if pr["headRefName"] == task or pr["headRefName"].endswith("/" + task)]
+    return max(hits, key=lambda pr: pr["number"]) if hits else None
+
+
+def pane_facts(m, terminals, ps_list, now_ms, no_queue):
+    """{"busy", "attention", "reason"} for the agent in a manager's terminal, or None when Orca
+    shows no agent in that pane. The pane row is built and classified the way board.py builds
+    a manager's row, so auto-cleanup and the board can't disagree about it."""
+    pane = ((terminals or {}).get(m.get("terminal")) or {}).get("pane")
+    if not pane:
+        return None
+    for wt in ps_list or []:
+        for ag in wt.get("agents") or []:
+            if ag.get("paneKey") != pane:
+                continue
+            role = {"kind": "manager", "name": m.get("slug"), "status": m.get("status"),
+                    "terminal": m.get("terminal"), "terminal_state": m.get("terminal_state")}
+            row = board_rules.make_row(wt, ag, now_ms, no_queue=no_queue, role=role)
+            att, why = board_rules.classify(row, stale_min=BOARD.get("stale_min", board_rules.STALE_MIN),
+                                            question_max_min=BOARD.get("question_max_min", board_rules.QUESTION_MAX_MIN),
+                                            phrases=BOARD.get("decision_phrases") or (),
+                                            negations=BOARD.get("negations") or ())
+            return {"busy": ag.get("state") in BUSY_STATES, "attention": att, "reason": why}
+    return None
+
+
+def read_file(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def terminal_tail(handle, limit=200):
+    """The terminal's last lines as one string, or None. Only matched against secret patterns
+    in memory; never printed or written anywhere."""
+    code, out, _ = run([ORCA, "terminal", "read", "--terminal", handle, "--limit", str(limit), "--json"])
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return None
+    if code or not data.get("ok"):
+        return None
+    tail = (data.get("result") or {}).get("tail")
+    if isinstance(tail, list):
+        return "\n".join(str(l) for l in tail)
+    return tail if isinstance(tail, str) else None
+
+
+def cmd_cleanup_auto(rows, seen, idle_hours, dry):
+    """Remove every worktree decide() calls removable, then close every manager terminal
+    managers.safe_to_close() allows. One line per action and per skip, with the reason.
+    A failed orca call is reported and the rest continues: one stuck worktree must not
+    leave every finished manager open."""
+    for r in sorted(rows, key=lambda r: r["name"]):
+        ok, why = decide(r, idle_hours)
+        if not ok:
+            print(f"skip    {r['name']}: {why}")
+            continue
+        cmd = [ORCA, "worktree", "rm", "--worktree", f"id:{r['id']}", "--force", "--json"]
+        if dry:
+            print(f"DRY-RUN would remove {r['name']} ({why}): {shlex.join(cmd)}")
+            continue
+        code, out, err = run(cmd)
+        print(f"removed {r['name']} ({why})" if code == 0 else f"FAILED  remove {r['name']}: {(err or out)[-200:]}")
+
+    repo_root, _ = repo_context()
+    common = cfgmod.common_dir(repo_root)
+    notes = []
+    terminals = live_terminals(notes)
+    for n in notes:
+        print(f"! {n}")
+    rows_by_name = {r["name"]: r for r in rows}
+    tasks = sorted(set(rows_by_name) | set(mgrmod.brief_tasks(common)))
+    managers, _ = mgrmod.assign(common, tasks, terminals, notes)
+    own = os.environ.get("ORCA_TERMINAL_HANDLE")
+    no_queue = not cfgmod.queue_enabled(CFG)
+    now_ms = time.time() * 1000
+    for m in managers:
+        label = f"manager:{m['name']}"
+        if m.get("recorded") and m.get("status") == mgrmod.CLOSED:
+            continue
+        worker_prs = None if seen["prs"] is None else {
+            t: pr_of_task(t, rows_by_name, seen["prs"]) for t in m["workers"]}
+        pane = pane_facts(m, terminals, seen["ps"], now_ms, no_queue)
+        notes_text = read_file(os.path.join(common, "orca-flow", "managers", m["slug"], "notes.md")) \
+            if m.get("recorded") else None
+        # The tail is read only for a manager that passes everything else (an empty tail stands
+        # in for it until then): reading every terminal would be slow and shows nothing new.
+        tail = None
+        if mgrmod.safe_to_close(m, worker_prs, pane, own, notes_text, "")[0]:
+            tail = terminal_tail(m["terminal"])
+        ok, why = mgrmod.safe_to_close(m, worker_prs, pane, own, notes_text, tail)
+        if not ok:
+            print(f"skip    {label}: {why}")
+            continue
+        cmd = [ORCA, "terminal", "close", "--terminal", m["terminal"], "--json"]
+        if dry:
+            print(f"DRY-RUN would close {label} terminal {m['terminal']} ({why}): {shlex.join(cmd)}")
+            continue
+        code, out, err = run(cmd)
+        if code:
+            print(f"FAILED  close {label}: {(err or out)[-200:]}")
+            continue
+        try:
+            mgrmod.mark_closed(common, m["slug"])
+        except (OSError, ValueError) as e:
+            # The terminal is closed either way; without the mark the board will call it dead.
+            print(f"closed  {label} terminal {m['terminal']} ({why}); "
+                  f"FAILED to mark the record closed ({e.__class__.__name__}), the board may show it as dead")
+            continue
+        print(f"closed  {label} terminal {m['terminal']} ({why}); record marked closed")
+
+
 def manager_word(m):
-    """live / hidden / dead / gone / done / ? for a manager header. dead is a managers/
-    record that never said done; gone is an interactive manager whose session ended, which
-    is normal."""
-    if m.get("recorded") and m.get("status") == mgrmod.DONE:
-        return "done"
+    """live / hidden / dead / gone / done / closed / ? for a manager header. dead is a
+    managers/ record that never said done; gone is an interactive manager whose session
+    ended, which is normal; closed is one cleanup --auto closed."""
+    if m.get("recorded") and m.get("status") in mgrmod.FINISHED:
+        return m["status"]
     state = m.get("terminal_state")
     if state is None:
         return "?"
@@ -497,7 +629,10 @@ def main():
     ov.add_argument("paths", nargs="*", help="files or directories this package will touch (repo-relative)")
     ov.add_argument("--no-fetch", action="store_true")
     cl = sub.add_parser("cleanup")
-    cl.add_argument("--apply", metavar="NAMES", help="comma-separated worktree names; removes only these")
+    how = cl.add_mutually_exclusive_group()
+    how.add_argument("--apply", metavar="NAMES", help="comma-separated worktree names; removes only these")
+    how.add_argument("--auto", action="store_true",
+                     help="remove every candidate and close finished manager terminals, without asking")
     cl.add_argument("--idle-hours", type=float, default=IDLE_HOURS, help=f"default: cleanup.idle_hours ({IDLE_HOURS:g})")
     cl.add_argument("--no-fetch", action="store_true")
     cl.add_argument("--dry-run", action="store_true")
@@ -513,7 +648,7 @@ def main():
         cmd_handoff(a.name)
         return
 
-    rows, notes = collect(fetch=not a.no_fetch)
+    rows, notes, seen = collect(fetch=not a.no_fetch)
     for n in notes:
         print(f"! {n}")
 
@@ -583,6 +718,9 @@ def main():
         return
 
     dry = a.dry_run or os.environ.get("ORCA_FLOW_DRY_RUN") == "1"
+    if a.auto:
+        cmd_cleanup_auto(rows, seen, a.idle_hours, dry)
+        return
     candidates = {}
     for r in sorted(rows, key=lambda r: r["name"]):
         ok, why = decide(r, a.idle_hours)
