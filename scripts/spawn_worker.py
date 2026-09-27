@@ -509,19 +509,30 @@ def drop_last_messages(digest_text, handoff_path):
     return head + f"\n\n(Last messages omitted: the working set at `{handoff_path}` has them verbatim.)\n"
 
 
-def start_agent(wt_id, agent_cmd, prompt, base_info, title="worker"):
-    term = orca("terminal", "create", "--worktree", f"id:{wt_id}", "--title", title, "--command", agent_cmd, context=base_info)
+def start_agent(wt_id, agent_cmd, prompt, base_info, title="worker", selector=None, role="worker",
+                on_created=None, on_sent=None):
+    """Start the agent in a new terminal, send the prompt once, read the tail back, print the result.
+
+    selector (e.g. path:<main checkout>) replaces id:<wt_id>, and role names the agent in
+    messages, so spawn_manager.py reuses this without the worker's output changing.
+    on_created(handle) runs before the wait and on_sent() after a send that didn't reach a
+    bare shell, so a caller can keep its own state file in step with the terminal."""
+    term = orca("terminal", "create", "--worktree", selector or f"id:{wt_id}", "--title", title, "--command", agent_cmd,
+                context=base_info)
     handle = find_key(term, "handle")
     if not handle:
-        die("terminal create returned no handle; the worktree exists, find it with orca terminal list", **base_info)
+        where = "the worktree exists, " if role == "worker" else ""
+        die(f"terminal create returned no handle; {where}find it with orca terminal list", **base_info)
     base_info["terminal"] = handle
+    if on_created:
+        on_created(handle)
     # A prompt sent before the TUI is ready is lost. Only send on satisfied:true —
     # a timed-out wait still prints a normal-looking result, so output alone proves nothing.
     for timeout_ms in ("120000", "240000"):
         if find_key(orca("terminal", "wait", "--terminal", handle, "--for", "tui-idle", "--timeout-ms", timeout_ms, context=base_info), "satisfied") is True:
             break
     else:
-        die("the worker's TUI never went idle, so the prompt was not sent. Go look at that terminal.", **base_info)
+        die(f"the {role}'s TUI never went idle, so the prompt was not sent. Go look at that terminal.", **base_info)
     receipt = orca("terminal", "send", "--terminal", handle, "--text", prompt, "--enter", "--wait-submit", "20",
                    context={**base_info, "warning": "this send failed to report back, but the prompt may have arrived. Read the terminal first; do not re-send."})
     # The receipt says the text was typed, not that an agent read it: a worker that quit at
@@ -534,10 +545,12 @@ def start_agent(wt_id, agent_cmd, prompt, base_info, title="worker"):
         verdict, why = classify_tail(tail, prompt)
     if verdict == "worker exited":
         last = [l for l in tail if l.strip()][-10:]
-        print(json.dumps({"ok": False, "error": f"worker exited: {why}", **base_info, "last_lines": last,
+        print(json.dumps({"ok": False, "error": f"{role} exited: {why}", **base_info, "last_lines": last,
                           "note": "The prompt was not re-sent. Start the agent in that terminal again and send the prompt by hand."},
                          ensure_ascii=False, indent=1))
         sys.exit(2)
+    if on_sent:
+        on_sent()
     print(json.dumps({
         "ok": True,
         **base_info,

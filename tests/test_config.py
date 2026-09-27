@@ -180,6 +180,27 @@ class CheckTest(ConfigTestBase):
         self.cli("set", "handoff.max_continues", "3")
         self.assertEqual(self.cli("check")[0], 0)
 
+    def test_sources_must_be_an_object_of_paths(self):
+        os.makedirs(os.path.join(self.root, "docs"))
+        open(os.path.join(self.root, "docs", "asana.md"), "w").close()
+        self.write(os.path.join(self.root, "orca-flow.json"),
+                   {"sources": {"asana": "docs/asana.md", "linear": "docs/linear.md", "bad": 3}})
+        code, out = self.cli("check")
+        self.assertEqual(code, 1)
+        self.assertIn("error: sources.bad: expected a path string", out)
+        self.assertIn("note: sources.linear: docs/linear.md does not exist", out)
+        self.assertNotIn("sources.asana", out)  # a source name is not an unknown key
+        self.write(os.path.join(self.root, "orca-flow.json"), {"sources": ["docs/asana.md"]})
+        self.assertIn("error: sources: expected object", self.cli("check")[1])
+
+    def test_manager_defaults(self):
+        cfg = cfgmod.load()
+        self.assertEqual(cfg["manager"], {"model": "opus", "bypass_permissions": False})
+        self.assertEqual(cfg["sources"], {})
+        _, out = self.cli("keys")
+        for key in ("manager.model", "manager.bypass_permissions", "sources"):
+            self.assertIn(key, out)
+
     def test_keys_marks_changed(self):
         self.cli("set", "cleanup.idle_hours", "12")
         code, out = self.cli("keys")
