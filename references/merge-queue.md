@@ -22,37 +22,18 @@ written by `handover.py`. Any queue session reads the same directory, so it does
 session is the queue today, whether it was restarted, or what it's called. A chat message is a
 courtesy on top; the file is the record.
 
-Contents: finding the running queue · handing a PR over · starting a queue · the loop ·
-rotating the queue · deploying · heavy verification · reporting back
+Managers find the running queue and hand PRs over by `references/manager.md`. This file is the
+queue's side.
 
-## Finding the running queue (managers, always first)
+Contents: status file · starting a queue · the loop · rotating the queue · heavy verification ·
+deploying · reporting back
 
-```
-python3 scripts/handover.py queue show        # queue/state.json: the registered session, since when, batches done
-```
-If `active` is set, a queue is registered: hand the PR over (next section) and, if you want it
-picked up now rather than at the queue's next look, `--notify` its terminal handle. If `active`
-is null, check the old way before starting one, because a queue may be running unregistered:
-ListAgents (a session whose name or summary mentions merge, deploy or queue), `orca worktree ps
---json` (comments and prompts), `orca terminal list --json` (a terminal titled merge-queue). If
-you find one, tell it to run `handover.py queue start`. Start a new queue only if none exists.
+## Status file
 
-## Handing a PR over (managers)
-
-```
-python3 scripts/handover.py send <pr> --pending "<none | decisions the user still has to make>" --verified "<what the worker ran, and that the full suite was not>" --after-deploy "<none | what to check>" --note "<one line for the status file>" --report-to <your session name, from ListAgents read just now> [--notify <queue terminal handle>]
-```
-- The script copies the **head** from `gh pr view`, so the queue merges the commit that exists,
-  not one typed from memory. Review at that head: `gh pr view <n> --json headRefOid` and read the
-  diff at that commit, not the one you looked at two pushes ago.
-- It refuses drafts and closed PRs, marks migration files (new, or modified old ones), and prints
-  the one-line message. Sending that line by SendMessage too is fine; the file is what counts.
-- **After handing over,** leave the PR's branch alone: no pushes, no rebases. If the worker has to
-  push again, run `send` again; the file records the new head and keeps the old one in history.
-- **Waiting for the result:** `handover.py status <pr>` prints `pending`, `taken`, `done <sha>`,
-  `returned — <reason>` or `unhanded`. A Monitor until-loop can wait on it.
-- **If no queue is running:** the user saying "merge and deploy" is enough to start one (next
-  section). Tell the user you did.
+If the project has one (`merge_queue.state_file`), only the queue writes it, and it is read
+from the top, never whole. When it grows past `merge_queue.state_file_keep` entries the queue
+runs `python3 scripts/archive_status.py` (with `--dry-run` first), which moves the older entries
+to an archive file next to it. Updating it is step 6 of the loop.
 
 ## Starting a queue
 

@@ -3,10 +3,11 @@
 A Claude Code skill for running several coding agents in parallel on one repository, through
 [Orca](https://orca.computer) worktrees, without them stepping on each other.
 
-Three roles, one owner per shared resource:
+Four roles, one owner per shared resource:
 
 | Role | Where it works | Owns | Never does |
 |---|---|---|---|
+| **Dispatcher** | the main checkout | picking tasks from a task source, one manager per task | writing worker briefs, starting workers, editing code |
 | **Manager** | the main checkout | briefs, starting workers, reviewing PRs | editing feature code, merging, deploying |
 | **Worker** | its own worktree | one package, targeted tests, one PR | merging, deploying, running the full suite, starting other workers |
 | **Merge queue** | a clean worktree of its own | merging, the full check, deploying, the status file | building features |
@@ -19,11 +20,16 @@ three PRs all rewriting the same status file. Each of those has exactly one owne
 ## What's in it
 
 ```
-SKILL.md                      the flow itself (this is what the model reads)
-references/merge-queue.md     merging, verifying and deploying a batch
+SKILL.md                      the core every session reads: roles, settings, test lock, pitfalls, which file to read next
+references/dispatcher.md      dispatcher: pick tasks from a source, start one manager each
+references/manager.md         manager: briefs, workers, review, handing PRs over, cleanup
+references/merge-queue.md     merge queue: merging, verifying and deploying a batch
+references/sources.md         the task-source contract (a markdown doc per source)
 references/configuration.md   every config key
+references/board.md           board rules and row schema
 assets/common.md              worker rules, rendered per project
 assets/brief-template.md      what a brief has to contain
+scripts/spawn_manager.py      start a manager session in the main checkout for one task; --list shows managers
 scripts/spawn_worker.py       create worktree → start agent → wait for its TUI → send the brief once; --continue restarts a worker from its transcript
 scripts/worktrees.py          inventory · status · context · handoff · overlap · cleanup
 scripts/handover.py           hand a PR to the queue as a file; the queue takes / finishes / returns it; queue rotation

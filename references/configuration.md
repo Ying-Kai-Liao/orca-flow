@@ -84,6 +84,9 @@ overrides both.
 | `worker.context_warn` | `0.35` | Where a worker is flagged `!`: a fraction of the window (`<= 1`, e.g. `0.35`) or an absolute token count (`> 1`, e.g. `70000`). With handoff on, the manager then wraps it up and `--continue`s it. |
 | `worker.transcripts_dir` | `~/.claude/projects` | Where Claude Code writes session transcripts, if not the default (`$CLAUDE_CONFIG_DIR` is honoured). |
 | `worker.bypass_permissions` | `false` | Start workers with `bypassPermissions` without passing `--bypass` (`--no-bypass` overrides). Only for a manager that runs that way itself. |
+| `manager.model` | `"opus"` | Model for managers started by `spawn_manager.py`. `--model` overrides it. |
+| `manager.bypass_permissions` | `false` | Start managers with `bypassPermissions` without passing `--bypass` (`--no-bypass` overrides). Only for a dispatcher that runs that way itself. |
+| `sources` | `{}` | Task sources for the dispatcher: source name -> path of the source's markdown doc, relative to the repo, e.g. `{"asana": ".claude/skills/asana-task/SKILL.md"}`. The doc's required sections are in `references/sources.md`. |
 | `handoff.enabled` | `true` | Whether flagged workers are wrapped up and continued in a fresh session. `false`: they run to the end on the agent's own compaction, the worker rules drop the wrap-up section, and `--continue` is only for a worker that died. |
 | `handoff.digest` | `true` | Whether `--continue` writes `handoff-digest.md` from the old session's transcript. |
 | `handoff.wrap_up_message` | `"WRAP UP: commit WIP, push, …"` | The one line the manager sends a flagged worker. The worker rules quote the part before the colon, so keep a short prefix like `WRAP UP:`. |
