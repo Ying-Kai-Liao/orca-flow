@@ -113,6 +113,7 @@ overrides both.
 | `board.decision_phrases` | `[]` | Extra phrases (lowercase) that mark a last paragraph as asking the user to decide, added to the built-in English ones. For agents that write in another language. |
 | `board.negations` | `[]` | Extra negations (lowercase) that cancel a decision phrase right after them. |
 | `cleanup.idle_hours` | `3` | Idle hours before a worktree with no commits becomes a cleanup candidate. `worktrees.py cleanup --idle-hours` overrides. |
+| `cleanup.auto` | `false` | `true`: managers run `worktrees.py cleanup --auto` without asking after each PR they merge (no queue) or see deployed (`handover.py status` says `done`), and the queue runs it after each deployed batch. `false`: `--auto` runs only when the user asks for it. What it removes and closes is in `references/manager.md`, Cleanup. |
 
 ## jev-handoff working set (`handoff.*`)
 

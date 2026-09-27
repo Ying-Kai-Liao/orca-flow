@@ -205,6 +205,7 @@ python3 scripts/handover.py send <pr> --pending "<none | decisions the user stil
 ```
 python3 scripts/worktrees.py cleanup                 # every worktree with a reason; removes nothing
 python3 scripts/worktrees.py cleanup --apply a,b     # removes only the named ones that are still candidates
+python3 scripts/worktrees.py cleanup --auto [--dry-run]   # auto mode, below
 ```
 A worktree is a candidate only if all of these hold:
 - its PR is merged, or its HEAD is already on the base branch (a renamed branch or a
@@ -228,3 +229,19 @@ Never remove a worktree that has uncommitted changes.
   lists them with the tail of what they asked; put those questions in front of the user.
 - **Secrets:** if a terminal shows secret values, name that terminal to the user and suggest
   closing it and rotating the keys it shows. Never copy the values into files or replies.
+
+**Auto mode** (`cleanup --auto`) acts without the list, so it runs only when the user asked for
+it or `cleanup.auto` is `true`. With `cleanup.auto: true`, run it without asking after each PR
+you merge yourself (no queue) and after `handover.py status` says a PR you handed over is `done`.
+- **Worktrees:** removes every candidate above, by the same rules. Nothing looser.
+- **Manager terminals:** closes one only when all of these hold: it is a
+  `managers/<slug>/manager.json` record; its status is `done`, or `handed-over` with every
+  worker's PR merged or closed; its agent isn't busy and the board calls its pane `done` or
+  `idle`; its terminal isn't orphaned; `notes.md` has more than its header; it isn't the caller's
+  own terminal; and its output doesn't look like it shows a secret. The record then gets
+  `status: closed`, which the board doesn't flag as dead.
+- **Never touched:** worker, queue, dispatcher and interactive terminals, plain shells, and hidden
+  (orphaned) terminals. Each skip is printed with its reason: pass on the orphaned ones and the
+  "may show a secret" ones to the user.
+
+Without auto mode, "ask first" above still holds for everything.

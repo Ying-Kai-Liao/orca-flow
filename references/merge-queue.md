@@ -160,6 +160,8 @@ python3 scripts/handover.py done <pr> --sha <short sha> --report "<target> healt
 prints the report line; also send it by SendMessage to the session named in the file if that
 session still exists. For a PR you didn't merge: `handover.py back <pr> --reason "..."`. Then
 `orca worktree set --worktree active --comment "<PRs> deployed <short sha>" --json`.
+If `cleanup.auto` is `true`, then run `python3 scripts/worktrees.py cleanup --auto` and put
+its skipped orphaned or "may show a secret" terminals in your report.
 
 ## Rotating the queue
 

@@ -44,6 +44,9 @@ NEGATION_WINDOW = 12  # chars before a phrase in which a negation cancels it
 QUESTION_MAX_MIN = 240
 # The handover file exists but the queue sent the PR back: it needs handing over again.
 NOT_HANDED = {"returned"}
+# Manager record statuses that mean it finished: done, or closed by `worktrees.py cleanup
+# --auto` (managers.FINISHED; repeated here because this module imports nothing of ours).
+ROLE_FINISHED = ("done", "closed")
 
 # Trailing markup that can sit after the real last character: bold, code, quotes.
 _TRAILING = re.compile("[\\s*_`'\"\u300d\u300f]+$")  # also CJK closing quotes
@@ -109,7 +112,8 @@ def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN, phrase
     1. Orca says the agent is waiting on the user.
     1a. A registered role (row["role"]: a managers/ record or the repo's merge queue) whose
         terminal is orphaned in Orca, running with no pane nobody can see: hidden. A managers/
-        record that isn't done but whose terminal is gone: manager_dead. Both come before
+        record that isn't done (or closed by cleanup --auto) but whose terminal is gone:
+        manager_dead. Both come before
         the card rules because nobody would otherwise notice either.
     2. The card says BLOCKED, then HANDOFF: the worker has already said what it needs.
     3. The agent stopped and its last message asks something (prose questions look like done),
@@ -126,9 +130,9 @@ def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN, phrase
     role = row.get("role") or {}
     if role:
         term, name, kind = role.get("terminal_state"), role.get("name"), role.get("kind")
-        if term == "hidden" and (kind == "queue" or role.get("status") != "done"):
+        if term == "hidden" and (kind == "queue" or role.get("status") not in ROLE_FINISHED):
             return "hidden", f"{kind} {name}: terminal {role.get('terminal')} is orphaned (no pane in Orca)"
-        if kind == "manager" and term == "gone" and role.get("status") != "done":
+        if kind == "manager" and term == "gone" and role.get("status") not in ROLE_FINISHED:
             return "manager_dead", f"manager {name} is {role.get('status') or 'not done'} but its terminal is gone"
     if comment.startswith("BLOCKED"):
         return "blocked", "card comment starts with BLOCKED"

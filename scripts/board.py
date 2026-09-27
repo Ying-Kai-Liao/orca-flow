@@ -235,12 +235,12 @@ def collect(stale_min=None, repo_filter=None, use_gh=True, question_max_min=None
 
 def role_targets(managers, queue, terminals):
     """(label, role) for each terminal the board checks: every managers/ record that isn't
-    done, and the registered merge queue. Nothing when Orca's terminal list is unknown."""
+    done (or closed by cleanup --auto), and the registered merge queue. Nothing when Orca's terminal list is unknown."""
     if terminals is None:
         return []
     out = []
     for m in managers:
-        if m["recorded"] and m.get("status") != mgrmod.DONE:
+        if m["recorded"] and m.get("status") not in mgrmod.FINISHED:
             out.append((f"manager:{m['slug']}", {"kind": "manager", "name": m["slug"], "status": m.get("status"),
                                                   "terminal": m.get("terminal"), "terminal_state": m["terminal_state"]}))
     if queue and queue.get("terminal"):
