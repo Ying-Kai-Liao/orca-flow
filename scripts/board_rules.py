@@ -12,7 +12,7 @@ the same way.
 """
 import re
 
-ATTENTION = ("needs_human", "blocked", "unhanded_pr", "stale", "handoff",
+ATTENTION = ("needs_human", "blocked", "manager_dead", "hidden", "unhanded_pr", "stale", "handoff",
              "unknown", "working", "done", "idle")
 # Sort order for display: what needs a person first, quiet rows last.
 PRIORITY = {a: i for i, a in enumerate(ATTENTION)}
@@ -107,6 +107,10 @@ def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN, phrase
 
     Order matters, first match wins:
     1. Orca says the agent is waiting on the user.
+    1a. A registered role (row["role"]: a managers/ record or the repo's merge queue) whose
+        terminal is orphaned in Orca, running with no pane nobody can see: hidden. A managers/
+        record that isn't done but whose terminal is gone: manager_dead. Both come before
+        the card rules because nobody would otherwise notice either.
     2. The card says BLOCKED, then HANDOFF: the worker has already said what it needs.
     3. The agent stopped and its last message asks something (prose questions look like done),
        unless it has sat unanswered for longer than question_max_min: then it is done.
@@ -119,6 +123,13 @@ def classify(row, stale_min=STALE_MIN, question_max_min=QUESTION_MAX_MIN, phrase
     comment = (row.get("comment") or "").strip().upper()
     if state in WAITING_STATES:
         return "needs_human", f"Orca state is {state}"
+    role = row.get("role") or {}
+    if role:
+        term, name, kind = role.get("terminal_state"), role.get("name"), role.get("kind")
+        if term == "hidden" and (kind == "queue" or role.get("status") != "done"):
+            return "hidden", f"{kind} {name}: terminal {role.get('terminal')} is orphaned (no pane in Orca)"
+        if kind == "manager" and term == "gone" and role.get("status") != "done":
+            return "manager_dead", f"manager {name} is {role.get('status') or 'not done'} but its terminal is gone"
     if comment.startswith("BLOCKED"):
         return "blocked", "card comment starts with BLOCKED"
     if comment.startswith("HANDOFF"):
@@ -153,10 +164,13 @@ def _minutes(now_ms, then_ms):
     return round((now_ms - then_ms) / 60000, 1) if then_ms else None
 
 
-def make_row(wt, agent, now_ms, pr=None, handover=None, no_queue=False):
+def make_row(wt, agent, now_ms, pr=None, handover=None, no_queue=False, manager=None, role=None):
     """One board row from a `worktree ps` worktree and one of its agents (None for a worktree
-    with no agent pane). pr, handover and no_queue come from the caller, which can call gh
-    and read the queue directory and the repo's config; this function can't."""
+    with no agent pane). pr, handover, no_queue, manager and role come from the caller, which
+    can call gh and read the queue directory, the repo's config and the manager records;
+    this function can't. manager: name of the manager that owns this worker, or None. role:
+    None, or {kind: "manager"|"queue", name, status, terminal, terminal_state} when the row
+    is a registered manager's or the merge queue's terminal."""
     agent = agent or {}
     msg = (agent.get("lastAssistantMessage") or "").strip()
     return {
@@ -174,6 +188,8 @@ def make_row(wt, agent, now_ms, pr=None, handover=None, no_queue=False):
         "pr": pr,
         "handover": handover,
         "no_queue": bool(no_queue),
+        "manager": manager,
+        "role": role,
         "pane": agent.get("paneKey"),
         "agent_type": agent.get("agentType"),
         "state": agent.get("state"),

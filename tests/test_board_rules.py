@@ -410,6 +410,117 @@ class WatchDiffTest(unittest.TestCase):
         self.assertEqual(board.changes(cur, cur), [])
 
 
+class RoleRulesTest(unittest.TestCase):
+    """manager_dead and hidden: registered managers' and the merge queue's terminals."""
+
+    def role_row(self, kind="manager", status="running", terminal_state="gone", state=None):
+        r = make_row(wt(isMainWorktree=True), agent(state=state) if state else None, NOW,
+                     role={"kind": kind, "name": "asana-12", "status": status, "terminal": "term_a",
+                           "terminal_state": terminal_state})
+        return classify(r)
+
+    def test_manager_dead(self):
+        att, why = self.role_row()
+        self.assertEqual(att, "manager_dead")
+        self.assertIn("asana-12", why)
+        self.assertEqual(self.role_row(status="handed-over")[0], "manager_dead")
+
+    def test_done_manager_is_not_dead(self):
+        self.assertEqual(self.role_row(status="done")[0], "idle")
+
+    def test_unknown_terminal_is_not_dead(self):
+        self.assertEqual(self.role_row(terminal_state=None)[0], "idle")
+
+    def test_hidden_manager_and_queue(self):
+        self.assertEqual(self.role_row(terminal_state="hidden")[0], "hidden")
+        # Hidden wins over plain working: a working agent nobody can see is the problem.
+        self.assertEqual(self.role_row(terminal_state="hidden", state="working")[0], "hidden")
+        self.assertEqual(self.role_row(kind="queue", status=None, terminal_state="hidden")[0], "hidden")
+        self.assertEqual(self.role_row(status="done", terminal_state="hidden")[0], "idle")
+
+    def test_live_manager_classifies_normally(self):
+        self.assertEqual(self.role_row(terminal_state="live", state="working")[0], "working")
+
+    def test_rows_carry_manager_fields(self):
+        r = make_row(wt(), agent(), NOW, manager="mgr-a")
+        self.assertEqual((r["manager"], r["role"]), ("mgr-a", None))
+        self.assertIsNone(make_row(wt(), agent(), NOW)["manager"])
+
+
+class BoardManagersTest(unittest.TestCase):
+    """board.collect with manager records, a queue state file and a terminal list."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.common = self.tmp.name
+
+    def write(self, rel, data):
+        path = os.path.join(self.common, "orca-flow", rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def collect(self, terminals):
+        import board
+        main = wt(worktreeId="r::/w/main", path="/w/main", isMainWorktree=True, comment="BLOCKED: main card",
+                  agents=[agent(paneKey="tabM:leafM", state="working"), agent(paneKey="tabO:leafO")])
+        worker = wt(worktreeId="r::/w/w1", path="/w/w1", agents=[agent(paneKey="tabW:leafW")])
+        queue = wt(worktreeId="r::/w/merge-queue", path="/w/merge-queue", agents=[agent(paneKey="tabQ:leafQ")])
+        fake = {("worktree", "ps", "--limit", "1000"): {"worktrees": [main, worker, queue]},
+                ("repo", "list"): {"repos": [{"id": "repo1", "path": self.common}]}}
+
+        def orca(*a):
+            if a[:2] == ("terminal", "list"):
+                if terminals is None:
+                    raise board.OrcaError("no orca")
+                return {"terminals": terminals}
+            return fake[a]
+        with mock.patch.object(board, "orca", side_effect=orca), \
+                mock.patch.object(board, "git_common_dir", return_value=self.common), \
+                mock.patch.object(board, "repo_settings",
+                                  return_value={"no_queue": True, "stale_min": 30, "question_max_min": 240}):
+            rows, notes = board.collect(use_gh=False)
+        return {r["label"]: r for r in rows}, notes
+
+    def test_manager_pane_worker_owner_dead_manager_hidden_queue(self):
+        self.write("managers/asana-12/manager.json", {"slug": "asana-12", "terminal": "term_m", "status": "running"})
+        self.write("managers/gone-1/manager.json", {"slug": "gone-1", "terminal": "term_dead", "status": "running"})
+        self.write("managers/old/manager.json", {"slug": "old", "terminal": "term_old", "status": "done"})
+        self.write("briefs/w1/manager.json", {"session": "s", "terminal": "term_m"})
+        self.write("queue/state.json", {"active": {"session": "mq", "terminal": "term_q", "batches": 2}})
+        rows, notes = self.collect([
+            {"handle": "term_m", "tabId": "tabM", "leafId": "leafM", "orphaned": False},
+            {"handle": "term_q", "tabId": "tabX", "leafId": "leafX", "orphaned": True},
+        ])
+        self.assertEqual(notes, [])
+        self.assertEqual(sorted(rows), ["main@tabO:leaf", "manager:asana-12", "manager:gone-1", "merge-queue",
+                                        "queue:mq", "w1"])
+        m = rows["manager:asana-12"]
+        self.assertEqual((m["pane"], m["attention"], m["role"]["terminal_state"]), ("tabM:leafM", "blocked", "live"))
+        self.assertEqual(rows["w1"]["manager"], "asana-12")
+        self.assertIsNone(rows["merge-queue"]["manager"])
+        dead = rows["manager:gone-1"]
+        self.assertEqual((dead["attention"], dead["pane"], dead["comment"]), ("manager_dead", None, ""))
+        self.assertEqual(rows["queue:mq"]["attention"], "hidden")
+
+    def test_queue_live_gets_no_extra_row_and_orphaned_pane_is_marked(self):
+        self.write("queue/state.json", {"active": {"session": "mq", "terminal": "term_q", "batches": 2}})
+        rows, _ = self.collect([{"handle": "term_q", "tabId": "tabQ", "leafId": "leafQ", "orphaned": False}])
+        self.assertNotIn("queue:mq", rows)
+        self.assertEqual(rows["merge-queue"]["role"]["kind"], "queue")
+        rows, _ = self.collect([{"handle": "term_q", "tabId": "tabQ", "leafId": "leafQ", "orphaned": True}])
+        self.assertEqual(rows["merge-queue"]["attention"], "hidden")
+
+    def test_terminal_list_failure_is_a_note_not_dead(self):
+        self.write("managers/gone-1/manager.json", {"slug": "gone-1", "terminal": "term_dead", "status": "running"})
+        rows, notes = self.collect(None)
+        self.assertNotIn("manager:gone-1", rows)
+        self.assertTrue(any("terminal list failed" in n for n in notes))
+        self.assertNotIn("manager_dead", {r["attention"] for r in rows.values()})
+
+
 def sample_path():
     env = os.environ.get("ORCA_FLOW_PS_SAMPLE")
     if env:
