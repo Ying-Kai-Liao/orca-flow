@@ -15,10 +15,7 @@ You own one task. Its state is in `<git-common-dir>/orca-flow/managers/<slug>/`:
 
 1. **Say who you are.** Read your session name from ListAgents and write it into
    `manager.json` `session` (a small `python3` edit of the JSON; the file is inside `.git/`, so
-   the main-checkout guard allows it). If `status` still says `starting`, set it to `running`.
-   <!-- Needs a decision: whether the manager or spawn_manager.py moves status to "running".
-        The contract only fixes who writes `session`; setting it here is harmless if the script
-        already did. -->
+   the main-checkout guard allows it).
    Pass that same name as `--manager` to `spawn_worker.py` and `--report-to` to `handover.py`,
    so workers and handovers point back at you.
 2. **If `notes.md` already has entries, you're a successor.** Read it, then check the workers'
