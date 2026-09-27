@@ -53,8 +53,9 @@ elif cmd == ["terminal", "show"]:
     print(json.dumps({"ok": True, "result": {"terminal": t}} if t else {"ok": False, "error": {"code": "not_found"}}))
 elif cmd == ["terminal", "close"]:
     h = args[args.index("--terminal") + 1]
-    state["terminals"] = [t for t in terminals if t["handle"] != h]
-    save()
+    if not state.get("close_sticks"):
+        state["terminals"] = [t for t in terminals if t["handle"] != h]
+        save()
     ok({"closed": True})
 elif cmd == ["terminal", "create"]:
     ok({"terminal": {"handle": "term_new"}})
@@ -229,6 +230,16 @@ class SpawnQueueTest(unittest.TestCase):
         # Close happened before the new terminal was created.
         order = [tuple(c[:2]) for c in self.calls("terminal")]
         self.assertLess(order.index(("terminal", "close")), order.index(("terminal", "create")))
+
+    def test_close_that_leaves_the_terminal_retires_and_starts_nothing(self):
+        active = self.register()
+        self.set_orca(terminals=[self.term("term_old", orphaned=True)], close_sticks=True)
+        code, res = self.run_json("--replace")
+        self.assertEqual(code, 1)
+        self.assertIn("close did not stop term_old; nothing was retired or started", res["error"])
+        self.assertEqual(len(self.calls("terminal", "close")), 1)
+        self.assertEqual(self.queue_state()["active"], active)
+        self.assertEqual(self.calls("terminal", "create"), [])
 
     def test_gone_terminal_is_retired_and_replaced_without_replace(self):
         self.register()

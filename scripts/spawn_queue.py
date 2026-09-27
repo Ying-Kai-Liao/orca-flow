@@ -197,6 +197,23 @@ def main():
         # "Only if it still exists": it may have exited since the list was read.
         if h in {t.get("handle") for t in spawn_manager.live_terminals()[0] or []} or show_terminal(h):
             orca("terminal", "close", "--terminal", h, context=base_info)
+    if close:
+        # A close that reports ok may still leave the process running (an orphaned terminal
+        # is exactly one Orca has lost track of). Retiring it and starting another then means
+        # two queues merging, so confirm each handle is gone before anything else changes.
+        after, complete = spawn_manager.live_terminals()
+        listed = None if after is None else {t.get("handle") for t in after}
+        for h in close:
+            if listed is None:
+                still = True
+            else:
+                still = h in listed or (not complete and show_terminal(h) is not None)
+            if still:
+                die(f"close did not stop {h}; nothing was retired or started. Check `orca terminal list --json` "
+                    f"for {h} (and, if it is still there, stop its claude process by hand, e.g. from Activity "
+                    "Monitor or `ps`), then run spawn_queue.py again."
+                    + (" (orca terminal list failed after the close, so it couldn't be confirmed.)" if listed is None else ""),
+                    **base_info)
     if retire:
         r = subprocess.run([sys.executable, HANDOVER, "queue", "retire", "--reason", retire], capture_output=True, text=True)
         if r.returncode:
