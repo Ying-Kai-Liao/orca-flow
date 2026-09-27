@@ -119,6 +119,8 @@ DEFAULTS = {
         # How a manager merges when there is no queue: gh pr merge --<method> (squash, merge, rebase).
         "merge_method": "squash",
         "worktree_name": "merge-queue",
+        # Model for the queue session spawn_queue.py starts. Never Fable (spawn_queue.py refuses).
+        "model": "opus",
         # A hand-written status file only the queue may edit (e.g. "NOW.md"). null = none.
         "state_file": None,
         # Deploy targets, in order. Each: {"name", "deploy": [...], "health_url", "backup": [...], "verify": [...]}
@@ -201,6 +203,7 @@ SCHEMA = {
     "merge_queue.enabled": (bool, "false: no queue session; the manager merges itself."),
     "merge_queue.merge_method": (str, "squash, merge or rebase (no-queue merges)."),
     "merge_queue.worktree_name": (str, "The clean worktree the queue works from."),
+    "merge_queue.model": (str, "Model for the queue session spawn_queue.py starts (--model overrides)."),
     "merge_queue.state_file": (str, "Status file only the queue edits, e.g. NOW.md."),
     "merge_queue.targets": (list, "Deploy targets, in order."),
     "merge_queue.rotate_after": (int, "Batches after which the queue retires itself."),

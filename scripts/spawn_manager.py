@@ -79,9 +79,10 @@ def all_records(root):
     return out
 
 
-def live_handles():
-    """(handles Orca reports, complete?) or (None, False) when orca can't be asked.
-    Not spawn_worker.orca(): that exits on failure, and --list must still print."""
+def live_terminals():
+    """(terminals Orca reports, complete?) or (None, False) when orca can't be asked.
+    Not spawn_worker.orca(): that exits on failure, and --list must still print.
+    spawn_queue.py reads the entries themselves, for their orphaned flag and worktree."""
     try:
         r = subprocess.run([spawn_worker.ORCA, "terminal", "list", "--json"], capture_output=True, text=True)
         data = json.loads(r.stdout)
@@ -90,8 +91,15 @@ def live_handles():
     if not data.get("ok"):
         return None, False
     res = data.get("result") or {}
-    handles = {t.get("handle") for t in res.get("terminals") or [] if isinstance(t, dict)}
-    return handles, not res.get("truncated")
+    return [t for t in res.get("terminals") or [] if isinstance(t, dict)], not res.get("truncated")
+
+
+def live_handles():
+    """(handles Orca reports, complete?) or (None, False) when orca can't be asked."""
+    terminals, complete = live_terminals()
+    if terminals is None:
+        return None, False
+    return {t.get("handle") for t in terminals}, complete
 
 
 def is_live(rec, handles, complete):

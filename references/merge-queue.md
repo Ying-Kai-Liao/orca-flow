@@ -38,16 +38,26 @@ to an archive file next to it. Updating it is step 6 of the loop.
 ## Starting a queue
 
 ```
-orca worktree create --repo id:<repoId> --name merge-queue --no-parent --setup run --json        # skip if it exists
-orca terminal create --worktree path:<repo worktrees dir>/merge-queue --title merge-queue --command "claude --model opus [--permission-mode bypassPermissions]" --json
-orca terminal wait --terminal <h> --for tui-idle --timeout-ms 120000 --json      # send only if satisfied is true
-orca terminal send --terminal <h> --text "You are this repo's merge queue. Use the orca-flow skill, read references/merge-queue.md and follow it; wait for managers to send you PRs." --enter --wait-submit 15 --json
+python3 scripts/spawn_queue.py [--model <m>] [--bypass|--no-bypass] [--dry-run]      # Bash timeout 600000
 ```
-- **Permission mode:** add `--permission-mode bypassPermissions` only if the manager starting the
-  queue runs in bypass mode itself. The queue runs deploy commands, and a permission prompt
-  nobody sees will stall it.
-- **The queue's first command** is `python3 scripts/handover.py queue start --session <its name from ListAgents>`.
-  Until then managers see no registered queue and may start another.
+It creates the queue worktree (`merge_queue.worktree_name`) if it's missing, starts a fresh
+session in a new, visible Orca terminal titled `merge-queue` in it, and sends the one-line
+prompt once the TUI is idle. The model is `--model`, else `merge_queue.model` (never Fable).
+
+- **One queue at a time.** It looks the registered queue up in Orca first. A live one: refused.
+  One whose terminal is gone: retired and replaced. One that is `hidden` (Orca reports the
+  terminal orphaned: the process runs, with no pane) or unknown, or any other agent running in
+  the queue worktree: refused unless `--replace`, because its process may still merge.
+  `--replace` closes that terminal (its scrollback is lost), retires it and starts the new
+  one; pass it only with the user's OK.
+- **Permission mode:** `--bypass` only if the session starting the queue runs in bypass mode
+  itself (default: `worker.bypass_permissions`). The queue runs deploy commands, and a
+  permission prompt nobody sees will stall it.
+- **The queue's first command** is `python3 scripts/handover.py queue start --session <its name from ListAgents>`
+  (the prompt says so). Until then managers see no registered queue.
+- **Never continue a queue with `claude --resume` / `--continue` in a shell, or start one
+  anywhere outside `spawn_queue.py`.** That is how a queue ends up running with no pane, merging
+  where nobody can see it. A queue is always a fresh session; its state is the handover files.
 
 ## The loop (queue)
 
@@ -158,10 +168,14 @@ and reports, so after `merge_queue.rotate_after` batches it is near the ceiling.
 When `handover.py list` says ROTATE and the current batch is deployed:
 
 1. `python3 scripts/handover.py queue retire --reason "rotation after N batches"`
-2. Set the card: `orca worktree set --worktree active --comment "queue retired; start a new one" --json`
-3. Tell the user (or the manager who is around) in one line, and stop taking handovers.
+2. `python3 scripts/spawn_queue.py` (Bash timeout 600000, same `--bypass` as you run with). Your
+   successor starts in a new visible Orca terminal in this worktree, registers itself and runs
+   `handover.py list`. Your own terminal (`$ORCA_TERMINAL_HANDLE`) doesn't count as a rival
+   queue; if you skipped step 1 it refuses and tells you to retire first.
+3. Set the card: `orca worktree set --worktree active --comment "queue rotated; new queue in <handle>" --json`
+4. Tell the user (or the manager who is around) the new terminal handle in one line, and stop
+   taking handovers.
 
-The next queue starts as in "Starting a queue", registers itself, and runs `handover.py list`.
 Nothing is lost: pending handovers are files, the deployed state is in the status file, and
 the retired session never has to be consulted. Don't hand a PR to a retired session, and don't
 keep one alive "just in case".
