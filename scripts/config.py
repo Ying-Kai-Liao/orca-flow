@@ -157,6 +157,15 @@ DEFAULTS = {
         # A worktree with no commits counts as abandoned after this many idle hours.
         "idle_hours": 3,
     },
+    # Manager sessions started by spawn_manager.py in the main checkout, one per task.
+    "manager": {
+        "model": "opus",
+        # Only for a dispatcher that itself runs with bypassPermissions.
+        "bypass_permissions": False,
+    },
+    # Where tasks come from: source name -> path of that source's doc, relative to the repo.
+    # spawn_manager.py only checks --source against these keys and records it for dedupe.
+    "sources": {},
 }
 
 # One line per key, for `config.py keys` and `config.py check`. The type is what `set`
@@ -206,6 +215,9 @@ SCHEMA = {
     "board.decision_phrases": (list, "Extra phrases that ask the user to decide (lowercase)."),
     "board.negations": (list, "Extra negations that cancel a decision phrase (lowercase)."),
     "cleanup.idle_hours": ((int, float), "Idle hours before a worktree with no commits is a cleanup candidate."),
+    "manager.model": (str, "Model for managers started by spawn_manager.py (--model overrides)."),
+    "manager.bypass_permissions": (bool, "Start managers with bypassPermissions by default."),
+    "sources": (dict, "Task sources: name -> repo-relative path of the source's doc."),
 }
 CHOICES = {"merge_queue.merge_method": ("squash", "merge", "rebase")}
 
@@ -488,6 +500,10 @@ def type_errors(raw):
             errors.append(("worker.context_warn", "must be above 0"))
         elif cw > 1 and cw != int(cw):
             errors.append(("worker.context_warn", "a fraction (<= 1) or a whole token count (> 1), not " + str(cw)))
+    sources = raw.get("sources") if isinstance(raw.get("sources"), dict) else {}
+    for name, path in sources.items():
+        if not isinstance(path, str):
+            errors.append((f"sources.{name}", f"expected a path string, got {json.dumps(path, ensure_ascii=False)}"))
     targets = mq.get("targets") if isinstance(mq.get("targets"), list) else []
     for i, t in enumerate(targets):
         if not isinstance(t, dict) or not t.get("name") or not isinstance(t.get("deploy"), list):
@@ -628,6 +644,15 @@ def cmd_keys(as_json):
     print("files: " + (", ".join(cfg["config_files"]) or "none (all defaults)"))
 
 
+def missing_sources(raw, root):
+    """Notes for source docs that don't exist. Only a note: the doc may live on a branch that
+    isn't checked out, and a missing doc doesn't stop spawn_manager.py recording the source."""
+    sources = raw.get("sources") if isinstance(raw.get("sources"), dict) else {}
+    return [(f"sources.{name}", f"{path} does not exist")
+            for name, path in sources.items()
+            if isinstance(path, str) and not os.path.exists(os.path.join(root or "", os.path.expanduser(path)))]
+
+
 def cmd_check():
     root = repo_root()
     try:
@@ -636,6 +661,7 @@ def cmd_check():
         print(f"error: invalid JSON: {e}")
         sys.exit(1)
     errors, notes = type_errors(raw)
+    notes += missing_sources(raw, root)
     for k, m in errors:
         print(f"error: {k}: {m}")
     for k, m in notes:
