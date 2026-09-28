@@ -658,7 +658,7 @@ def main():
     p.add_argument("--continue", dest="cont", action="store_true", help="new session in an existing worktree, from the old session's transcript")
     p.add_argument("--note", help="with --continue: one line from you for the new worker (what to do first)")
     p.add_argument("--manager", help="your session name (ListAgents, read just now); recorded in manager.json")
-    p.add_argument("--attach", nargs="*", default=[], help="screenshots and other files; copied next to the brief")
+    p.add_argument("--attach", nargs="*", action="extend", default=[], help="screenshots and other files; copied next to the brief")
     p.add_argument("--base", help="defaults to the repo's base branch; pass one only to stack on another branch")
     p.add_argument("--comment", help="the Orca card's status line; defaults to the brief's title")
     p.add_argument("--model", help="agent model; defaults to worker.model in the config")
