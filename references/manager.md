@@ -169,13 +169,22 @@ python3 scripts/handover.py queue show        # queue/state.json: the registered
 If `active` is set, a queue is registered: hand the PR over (next section) and, if you want it
 picked up now rather than at the queue's next look, `--notify` its terminal handle.
 
-If no queue is registered, or its terminal is gone, start one:
+If no queue is registered, or its terminal is gone, start one. **Don't ask the user first:**
+an approved PR with no queue to take it is reason enough, and no setting gates it. (Only
+`merge_queue.enabled: false` means no queue, and then you merge yourself.)
 ```
 python3 scripts/spawn_queue.py --dry-run      # what it would do; then without --dry-run (Bash timeout 600000)
 ```
 It refuses while a live queue is registered, and it retires a gone one by itself. It also
 refuses while any agent runs in the queue worktree unregistered (a queue that hasn't run
 `handover.py queue start` yet): tell that one to run it instead of starting another.
+
+If the output has a `warning`, some of `worker.full_check_command`, `merge_queue.targets` and
+`merge_queue.state_file` are unset, and the queue will merge without those steps. Start it
+anyway, and tell the user once, in the same message that says you started it: what the queue
+won't do, and values for those keys from how the project is actually tested and deployed (its
+test script, deploy script, status file). Set them with `config.py set` only after the user
+agrees; they reach the next queue session, not the running one.
 
 If the board flags the queue `hidden` (`queue:<session>`: Orca reports its terminal orphaned,
 so it runs, and may still merge, with no pane anyone can see), show the user and ask before
@@ -197,8 +206,8 @@ python3 scripts/handover.py send <pr> --pending "<none | decisions the user stil
   push again, run `send` again; the file records the new head and keeps the old one in history.
 - **Waiting for the result:** `handover.py status <pr>` prints `pending`, `taken`, `done <sha>`,
   `returned — <reason>` or `unhanded`. A Monitor until-loop can wait on it.
-- **If no queue is running:** the user saying "merge and deploy" is enough to start one
-  (`references/merge-queue.md`, "Starting a queue"). Tell the user you did.
+- **If no queue is running:** start one without asking ("Finding the running queue" above,
+  `references/merge-queue.md`, "Starting a queue"), then tell the user you did.
 
 ## Cleanup
 

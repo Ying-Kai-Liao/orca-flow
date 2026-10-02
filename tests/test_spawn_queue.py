@@ -168,6 +168,27 @@ class SpawnQueueTest(unittest.TestCase):
         self.assertEqual(res["queue"]["state"], "none")
         self.assertFalse(os.path.exists(self.queue_dir))
 
+    def test_warns_about_unconfigured_check_deploy_and_status_file(self):
+        code, res = self.run_json("--dry-run")
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["unconfigured"],
+                         ["worker.full_check_command", "merge_queue.targets", "merge_queue.state_file"])
+        self.assertIn("runs no full check; deploys nothing; keeps no status file", res["warning"])
+        code, res = self.run_json()
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["delivery"], "delivered")
+        self.assertIn("deploys nothing", res["warning"])
+
+    def test_no_warning_when_check_deploy_and_status_file_are_set(self):
+        with open(os.path.join(self.root, "orca-flow.json"), "w") as f:
+            json.dump({"worker": {"full_check_command": "npm test"},
+                       "merge_queue": {"state_file": "NOW.md",
+                                       "targets": [{"name": "demo", "deploy": ["./deploy.sh demo"]}]}}, f)
+        code, res = self.run_json("--dry-run")
+        self.assertEqual(code, 0, res)
+        self.assertNotIn("warning", res)
+        self.assertNotIn("unconfigured", res)
+
     def test_refuses_when_the_repo_has_no_queue(self):
         with open(os.path.join(self.root, "orca-flow.json"), "w") as f:
             json.dump({"merge_queue": {"enabled": False}}, f)

@@ -95,7 +95,7 @@ overrides both.
 | `handoff.state_dir` | `~/.local/state/jev-handoff` | Where jev-handoff keeps each session's working set (`<state_dir>/<session_id>/handoff.md`). Must match where the hook writes: `$JEV_HANDOFF_STATE_DIR` in the workers' environment, else jev-handoff's default (above). `install-hook` can't pass a state dir, so `spawn_worker.py` adds a warning to its `handoff_hook` note when the two differ. |
 | `handoff.hook` | `true` | Install jev-handoff's Stop hook into each worker worktree's `.claude/settings.local.json` (see below). |
 | `handoff.max_inline_lines` | `150` | A restarted worker whose working set is longer than this is told to grep it, not read it whole. |
-| `merge_queue.enabled` | `true` | `false` for a repo with no queue session: the manager reviews and merges PRs itself, `handover.py send` refuses (unless `--force`), and `worktrees.py inventory` / `board.py` don't report open PRs as `unhanded_pr`. Only an explicit `false` turns it off. |
+| `merge_queue.enabled` | `true` | Whether there is a queue. With `true`, a manager starts one when it needs one, without asking; no setting changes that. `false` for a repo with no queue session: the manager reviews and merges PRs itself, `handover.py send` refuses (unless `--force`), and `worktrees.py inventory` / `board.py` don't report open PRs as `unhanded_pr`. Only an explicit `false` turns it off. |
 | `merge_queue.merge_method` | `"squash"` | With no queue, how the manager merges: `gh pr merge <pr> --<method>` (`squash`, `merge` or `rebase`). |
 | `merge_queue.worktree_name` | `"merge-queue"` | The clean worktree the queue works from. |
 | `merge_queue.model` | `"opus"` | Model for the queue session `spawn_queue.py` starts. `--model` overrides it; a Fable model is refused. |
