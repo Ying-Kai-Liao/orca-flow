@@ -169,6 +169,18 @@ def main():
     plan = {"worktree": {"name": wt_name, "id": (wt or {}).get("id"), "path": (wt or {}).get("path"),
                          "exists": bool(wt)},
             "queue": queue, "close": close, "retire": retire, "command": agent_cmd, "title": TITLE, "prompt": prompt}
+    # Not a refusal: a queue with none of these still merges. The manager tells the user once
+    # what it can't do, so nobody assumes a check or a deploy happened.
+    missing = [k for k, v in (("worker.full_check_command", cfg["worker"].get("full_check_command")),
+                              ("merge_queue.targets", mq.get("targets")),
+                              ("merge_queue.state_file", mq.get("state_file"))) if not v]
+    if missing:
+        plan["unconfigured"] = missing
+        plan["warning"] = (f"{', '.join(missing)} not set: the queue merges but "
+                           + "; ".join(w for k, w in (("worker.full_check_command", "runs no full check"),
+                                                      ("merge_queue.targets", "deploys nothing"),
+                                                      ("merge_queue.state_file", "keeps no status file")) if k in missing)
+                           + ". Tell the user and offer values for config.py set.")
 
     if dry:
         print(json.dumps({"ok": True, "dry_run": True, **plan,

@@ -14,8 +14,11 @@ file — comes from the config.** Read it first and use exactly what it says:
 ```
 python3 scripts/config.py show
 ```
-If a step isn't configured, say so instead of inventing a command. Deploying with a guessed
-command is worse than not deploying.
+A value that isn't set is a step you skip, never one you improvise: no
+`worker.full_check_command` means no full check (report `full check: none configured`), no
+`merge_queue.targets` means no deploy (`handover.py done --no-deploy`), no
+`merge_queue.state_file` means no status file to update. Deploying with a guessed command is
+worse than not deploying.
 
 **The handover is a file, not a message.** `<git-common-dir>/orca-flow/queue/<pr>.json`,
 written by `handover.py`. Any queue session reads the same directory, so it doesn't matter which
@@ -43,6 +46,11 @@ python3 scripts/spawn_queue.py [--model <m>] [--bypass|--no-bypass] [--dry-run] 
 It creates the queue worktree (`merge_queue.worktree_name`) if it's missing, starts a fresh
 session in a new, visible Orca terminal titled `merge-queue` in it, and sends the one-line
 prompt once the TUI is idle. The model is `--model`, else `merge_queue.model` (never Fable).
+A manager starts it without asking the user whenever it has an approved PR and no live queue.
+
+- **Nothing to check or deploy with:** if `worker.full_check_command`, `merge_queue.targets` or
+  `merge_queue.state_file` is unset, the output lists them under `unconfigured` with a `warning`.
+  It still starts; the queue then merges without that step and says so in its report.
 
 - **One queue at a time.** It looks the registered queue up in Orca first. A live one: refused.
   One whose terminal is gone: retired and replaced. One that is `hidden` (Orca reports the
