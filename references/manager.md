@@ -69,6 +69,8 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
 3. **Write one brief per task** from `assets/brief-template.md`, in the project's language
    (`language` in the config).
    - Include background, acceptance criteria, what's out of scope, and decisions already made.
+   - Fill "Edge cases this touches" (states, existing features, repeats, old data) from the code,
+     not from memory; write "none" for a row only after checking.
    - Name existing code that looks similar but is a different feature — a CSV *import* sitting
      next to the new CSV *export*, say. Naming it keeps the worker from reusing or breaking it.
    - Workers can't see this conversation, so any image the user pasted must be passed with

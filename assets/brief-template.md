@@ -18,6 +18,19 @@ so the background has to be here.>
 - Existing features that look related but aren't this package: <e.g. the CSV import that already
   sits next to the new CSV export; don't reuse or break it>
 
+## Edge cases this touches
+
+Fill every line, even with "none". Most review-fix rounds catch cases from these four rows;
+naming them here lets the worker write the test before the reviewer finds the bug.
+- States: <which states of the records this changes can be in when the code runs — including
+  cancelled, expired, finished and half-done ones — and what should happen in each>
+- Existing features: <older features that read or write the same data or run on the same
+  trigger (background jobs, notifications, reports), and how this change must not break them>
+- Repeats: <the same request sent twice, a double click, a retry after a timeout, two people
+  doing it at once — what the second one should do>
+- Old data: <rows written before this change (missing columns, old formats, earlier rules)
+  and whether they still work or need a backfill>
+
 ## Decisions already made (follow them; don't reopen them)
 
 - <date>: <decision>
