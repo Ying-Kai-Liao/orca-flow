@@ -170,6 +170,13 @@ def render_rules(cfg, test_lock, base):
                      f"runs queue instead of piling up:\n  ```\n  bash {test_lock} {shown}\n  ```\n"
                      f"  Queueing plus the run itself often exceeds the Bash tool's 2-minute default: use "
                      f"`run_in_background`, or a timeout of 600000.\n")
+        if w.get("always_tests"):
+            # Workers only run tests near their change, so registry/drift tests used to fail
+            # first in the queue's full check and cost a whole return round trip.
+            always = test_cmd.replace("{files}", " ".join(w["always_tests"]))
+            test_rule += (f"- Before opening the PR, also run these repo-wide checks (they catch "
+                          f"registries/catalogs the queue's full check would otherwise send back):\n"
+                          f"  ```\n  bash {test_lock} {always}\n  ```\n")
     else:
         test_rule = (f"- Find how this project runs a single test file and run only the tests related to "
                      f"what you changed. Wrap the run in the test lock so parallel worktrees queue up:\n"

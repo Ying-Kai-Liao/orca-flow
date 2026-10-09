@@ -17,7 +17,8 @@ Lookup order (first file wins):
   3. <repo>/orca-flow.json
   4. <git-common-dir>/orca-flow/config.json     (local, never committed)
 The local file is also laid over whichever of 1-3 was found, so a value you don't want in
-the repo (or a personal preference) can live there without copying the rest.
+the repo (or a personal preference) can live there without copying the rest. For the lists in
+ADDITIVE_LISTS the local items are added to the repo's instead of replacing them.
 
 The repo is found from this script's location, not from the caller's cwd, so a manager
 sitting in a worktree and a worker sitting in another one read the same file.
@@ -35,7 +36,8 @@ Usage:
 `set` parses the value by the key's type (true/false, numbers, JSON for lists) and writes it
 into the config file that is already in use, or <repo>/orca-flow.json if there is none.
 --local writes <git-common-dir>/orca-flow/config.json instead, which is never committed and
-wins over the repo's file. --append adds one item to a list key. Unknown keys are refused
+wins over the repo's file (or adds to it, for ADDITIVE_LISTS). --append adds one item to a list
+key, in the file being written only. Unknown keys are refused
 unless --force, so a typo doesn't silently do nothing.
 
 For a repo that has never run orca-flow, use scripts/init.py instead: it also registers the
@@ -74,6 +76,9 @@ DEFAULTS = {
         "run_command": None,
         # Extra project rules, one bullet per string, appended to the worker rules.
         "extra_rules": [],
+        # Cheap repo-wide invariant test files (registries, catalogs, drift guards) every worker
+        # runs through test_command before its PR, so the queue's full check doesn't send it back.
+        "always_tests": [],
         # Files too big to read whole (repo-relative). Workers are told to read only the
         # functions they touch in these; briefs must give entry points with line ranges.
         "big_files": [],
@@ -190,6 +195,7 @@ SCHEMA = {
     "worker.migrations_dir": (str, "Numbered migrations directory; enables clash detection."),
     "worker.run_command": (str, "How to start the app to look at a UI change."),
     "worker.extra_rules": (list, "Extra bullets appended to the worker rules."),
+    "worker.always_tests": (list, "Repo-wide invariant test files every worker runs before its PR."),
     "worker.big_files": (list, "Files workers must never read whole."),
     "worker.big_file_lines": (int, "Above this many lines any file counts as big."),
     "worker.context_window": (int, "Context window the estimate is measured against, in tokens."),
@@ -228,6 +234,14 @@ SCHEMA = {
     "sources": (dict, "Task sources: name -> repo-relative path of the source's doc."),
 }
 CHOICES = {"merge_queue.merge_method": ("squash", "merge", "rebase")}
+
+# Lists where the local file adds to the repo file instead of replacing it. A local
+# worker.extra_rules used to hide the committed rules (secrets, design docs) from every
+# worker, silently. Only lists whose items are independent of each other are here; a list
+# like merge_queue.targets is one ordered whole, so local still replaces it (check warns).
+ADDITIVE_LISTS = ("worker.extra_rules", "worker.checks", "worker.big_files", "worker.always_tests",
+                  "main_checkout.allow_files", "main_checkout.allow_prefixes", "keep_worktrees",
+                  "board.decision_phrases", "board.negations")
 
 
 def _root_from(cwd):
@@ -310,24 +324,59 @@ def read_json(path):
         return json.load(f)
 
 
-def load_raw(root=None, use_env=True):
-    """(raw dict, files read): the main config file with the local one laid over it."""
+def raw_files(root=None, use_env=True):
+    """[(path, raw dict)]: the main config file, then the local one if it is a different file."""
     root = root or repo_root()
     path = config_path(root, use_env=use_env)
-    files, raw = [], {}
+    out = []
     if path:
-        raw = read_json(path)
-        if not isinstance(raw, dict):
-            raise ValueError(f"{path} is not a JSON object")
-        files.append(path)
+        out.append((path, read_json(path)))
     local = local_path(root) if root else None
     if local and os.path.isfile(local) and (not path or os.path.realpath(local) != os.path.realpath(path)):
-        over = read_json(local)
-        if not isinstance(over, dict):
-            raise ValueError(f"{local} is not a JSON object")
-        raw = merge(raw, over)
-        files.append(local)
-    return raw, files
+        out.append((local, read_json(local)))
+    for p, raw in out:
+        if not isinstance(raw, dict):
+            raise ValueError(f"{p} is not a JSON object")
+    return out
+
+
+def load_raw(root=None, use_env=True):
+    """(raw dict, files read): the main config file with the local one laid over it."""
+    parts = raw_files(root, use_env=use_env)
+    raw = parts[0][1] if parts else {}
+    if len(parts) > 1:
+        raw = merge_local(raw, parts[1][1])
+    return raw, [p for p, _ in parts]
+
+
+def merge_local(repo, local, prefix=""):
+    """The local file laid over the repo file: merge(), except that for ADDITIVE_LISTS the
+    result is the repo's items plus the local ones not already there, in order. For those keys
+    a local null or [] adds nothing (null means "not set", #7); `unset` in the repo file is
+    how to drop a repo item."""
+    out = copy.deepcopy(repo)
+    for k, v in local.items():
+        key = prefix + k
+        cur = out.get(k)
+        if key in ADDITIVE_LISTS and isinstance(cur, list) and (v is None or isinstance(v, list)):
+            out[k] = cur + [x for i, x in enumerate(v or []) if x not in cur and x not in v[:i]]
+        elif isinstance(v, dict) and isinstance(cur, dict):
+            out[k] = merge_local(cur, v, key + ".")
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def replaced_lists(repo, local, prefix=""):
+    """Dotted keys (outside ADDITIVE_LISTS) where the local file replaces a non-empty repo list."""
+    out = []
+    for k, v in local.items():
+        key, cur = prefix + k, repo.get(k)
+        if isinstance(v, dict) and isinstance(cur, dict):
+            out += replaced_lists(cur, v, key + ".")
+        elif isinstance(v, list) and isinstance(cur, list) and cur and key not in ADDITIVE_LISTS:
+            out.append(key)
+    return out
 
 
 def fill_nulls(cfg, defaults):
@@ -616,7 +665,8 @@ def cmd_set(a, root, delete=False):
     if not a.local and local and os.path.isfile(local) and os.path.realpath(local) != os.path.realpath(target):
         shadow = dig(read_json(local), a.key)
         if shadow is not None:
-            print(f"note: {local} also sets {a.key} = {json.dumps(shadow, ensure_ascii=False)}, and it wins")
+            how = "and its items are added" if a.key in ADDITIVE_LISTS else "and it wins"
+            print(f"note: {local} also sets {a.key} = {json.dumps(shadow, ensure_ascii=False)}, {how}")
 
 
 def _has(node, dotted):
@@ -664,14 +714,25 @@ def missing_sources(raw, root):
 def cmd_check():
     root = repo_root()
     try:
+        parts = raw_files(root)
         raw, files = load_raw(root)
     except ValueError as e:
         print(f"error: invalid JSON: {e}")
         sys.exit(1)
     errors, notes = type_errors(raw)
     notes += missing_sources(raw, root)
+    # A warning, not an error: replacing can be what was meant, but it used to hide repo
+    # rules from every worker without anyone noticing.
+    warnings = []
+    if len(parts) > 1:
+        (repo_file, repo_raw), (local_file, local_raw) = parts
+        warnings = [(k, f"{local_file} replaces the list in {repo_file}; only "
+                        f"{', '.join(ADDITIVE_LISTS)} add to it")
+                    for k in replaced_lists(repo_raw, local_raw)]
     for k, m in errors:
         print(f"error: {k}: {m}")
+    for k, m in warnings:
+        print(f"warning: {k}: {m}")
     for k, m in notes:
         print(f"note: {k}: {m}")
     print(f"{len(errors)} error(s) in " + (", ".join(files) or "no config file (defaults only)"))
