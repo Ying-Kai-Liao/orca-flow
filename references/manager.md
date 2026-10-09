@@ -163,6 +163,66 @@ flagged one. With `handoff.enabled: false` the manager never wraps a worker up; 
 keep going on the agent's own compaction. The queue retires itself after
 `merge_queue.rotate_after` batches (`references/merge-queue.md`, "Rotating the queue").
 
+## Decide yourself vs ask
+
+The user hands you a task so they don't have to run it. Ask only product decisions:
+- what the user or customer sees or pays for, where it isn't in the brief
+- who receives data
+- irreversible operations: deleting data, a migration that drops something, writes to the task
+  source
+
+Decide yourself, then say what you chose in your notes and the PR: ordering and splitting into
+workers, styling within the existing design system, tooling, test approach, which queue fix,
+restarting a stuck worker or queue. Never end a turn on "should I start the next worker?"; start
+it. Unclear requirements are still asked all at once (step 3); this narrows what counts as a
+question, it doesn't remove asking.
+
+## Relayed decisions
+
+A "the user decided X" that reaches you second-hand (a brief, a peer's message, a dispatcher
+relay) is a quote, not the decision. Confirm it with the user before acting when it contradicts
+an earlier decision or the spec, or changes who gets data or what deploys. Otherwise follow it,
+and keep the quote in `notes.md`.
+
+**Before you call a task done,** reread `notes.md` for relayed requirements (dated user quotes)
+and check each one shipped. A relay that only came by message may have been lost in a restart.
+
+## Something isn't live
+
+When the user says a change isn't live, check the hand-off before the deploy:
+```
+gh pr list --state open --search "<words from the task>"
+python3 scripts/handover.py list
+```
+A finished PR that was never handed over is the usual cause: hand it over (below). Only when the
+PR is merged (`handover.py status <pr>` says `done`) look at the deploy.
+
+## Read code at the base, not the main checkout
+
+The main checkout can be dozens of commits behind. Grep the base branch, after a `git fetch`:
+```
+git grep -n "<pattern>" origin/main -- <paths>
+git show origin/main:<path>
+```
+Never block or reject a PR on what the main checkout's files say.
+
+## Who owns a PR
+
+Before you review, push to or hand over a PR you didn't open, find its owner, in this order:
+1. The brief dir its worker came from, and that slug's `managers/<slug>/manager.json`.
+2. `handover.py status <pr>` and its handover file: `report_to` is who sent it.
+3. Still unclear: ask the user. Never drive a PR another manager owns.
+
+## E2E after deploy
+
+Only when the user asks: e2e runs are expensive, so they are never automatic.
+1. Wait until every PR of the task says `done` in `handover.py status <pr>` (a Monitor
+   until-loop).
+2. Run the project's e2e in a subagent (never on Fable; SKILL.md, "Settings") or a fresh
+   session, never in a worker.
+3. Report results per scenario: what passed, what failed, with the failing output. A failure is a
+   new worker, not a fix in the e2e session.
+
 ## Finding the running queue (always first)
 
 ```
