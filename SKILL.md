@@ -55,6 +55,10 @@ It writes the repo's config file, never the local one; `--local` writes the untr
 `<git-common-dir>/orca-flow/config.json` for personal preferences. Tell the user which file
 changed. Changes reach sessions started afterwards; running workers keep their rules.
 
+**Model:** never run workers, managers, the queue or subagents on Fable. Pass `--model opus`
+(or the configured `worker.model` / `manager.model`) to every Agent subagent call too; a
+subagent with no model inherits the caller's.
+
 ## Paths, context, addressing
 
 - **Scripts** live in this skill's `scripts/`; run them by absolute path. Anything that changes
@@ -70,6 +74,22 @@ changed. Changes reach sessions started afterwards; running workers keep their r
   `$ORCA_TERMINAL_HANDLE`. **`--worktree active` is fine,** because it resolves from your
   current directory.
 - **Status file** (`merge_queue.state_file`, if the project has one): only the queue writes it.
+
+## After a crash or resume
+
+When Orca restarts or sessions are resumed, every session gets a new name, so messages, handovers
+and `manager.json` point at names that no longer exist. Each role fixes its own:
+- **Manager:** read your new name from ListAgents and write it into `manager.json` `session`.
+  Re-point your handovers: `python3 scripts/handover.py retarget --all-from <old name>
+  --report-to <new name>`. Reread `notes.md`, then check every relayed requirement in it is
+  being worked on; a relay that came only by message is gone.
+- **Queue:** `python3 scripts/handover.py queue retire --reason "session renamed after restart"`,
+  then `python3 scripts/handover.py queue start --session <new name>`.
+- **Everyone:** Monitors died with the old session. Re-arm each one you had (handover status
+  loops, worker waits); a "previous session ended" notice means the same.
+- **Dispatcher:** `spawn_manager.py --list` and `board.py` to see which managers came back; tell
+  each live one to do the above. A manager whose terminal is gone is dead: restart it with
+  `--force`.
 
 ## Tests
 

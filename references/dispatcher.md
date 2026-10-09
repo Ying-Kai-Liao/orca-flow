@@ -27,8 +27,10 @@ they said.
 3. **Drop tasks already shipped.** For each: `git log --oneline -40 <base branch>`,
    `gh pr list --state all --limit 30`, and the top of the status file if there is one. If one
    shipped, tell the user which commit or PR instead of starting a manager.
-4. **Show the user the list once,** one line per task: id, title, start or skip, and why. Wait
-   for their OK. More managers means more workers: above ~3, suggest batching.
+4. **Show the user the list once,** one line per task: id, title, start or skip, and why. Then
+   start right away; wait for an OK only when the user asked to review the list first. Keep at
+   most 3 managers running on a 16 GB machine (each brings workers); start the rest as each one
+   finishes, without asking again.
 5. **Render each task into a brief** as the source doc's Render section says: the task's own
    text copied verbatim, your judgement in a separate section, attachments downloaded to local
    paths the brief names. Save it anywhere (your scratchpad); the script copies it.
@@ -48,6 +50,38 @@ they said.
 8. **Track them** with `spawn_manager.py --list` (status per manager) and `python3
    scripts/board.py` (managers with their workers under them). A manager asking the user
    something shows up there; put the question in front of the user.
+
+## Push to finish
+
+The user hands you the whole list so they don't have to drive it. That holds with or without a
+task source.
+- Never end a turn on a process question: "start batch 2?", "which queue fix?", "shall I
+  restart the manager?". Do it and say what you did.
+- Plumbing is yours: a dead manager, a stuck queue, a failed spawn. Fix it, then report.
+- Stop only for product decisions a manager can't make (manager.md, "Decide yourself vs ask"),
+  and the write-backs the source doc gates on the user's OK.
+
+## Check-ins
+
+When the user asks how things are going ("all done?", "merged?"), answer in one message:
+```
+python3 scripts/spawn_manager.py --list      # each manager's status
+python3 scripts/board.py                     # managers, their workers, who is waiting
+python3 scripts/handover.py list             # PRs waiting for, or taken by, the queue
+```
+- One compact table: task, manager, PRs, where each PR is (open, handed over, merged, deployed).
+- Then every pending question from manager and worker terminals (`needs_human` on the board,
+  `worktrees.py inventory`) as one numbered list, with whose it is. The user answers "1. … 2. …";
+  relay each answer to its owner (below).
+- The user never reads manager terminals. A question left there is a question nobody answers.
+
+## Relaying
+
+A message alone gets lost: a renamed session after a crash drops it, and the manager calls the
+task done without it. Every requirement or answer you pass to a manager is two things:
+1. The message (SendMessage, or `orca terminal send` with the manager's handle).
+2. A dated line in that manager's `managers/<slug>/notes.md` quoting the user verbatim:
+   `- 2026-10-04 user: "<their words>" (relayed by <your session name>)`.
 
 You don't write to the task source yourself unless the user asks; managers propose their
 write-backs to the user as the source doc says.
