@@ -97,5 +97,30 @@ class AlwaysTestsRuleTest(unittest.TestCase):
         self.assertNotIn("repo-wide checks", self.rules(always_tests=["tests/test_registry.py"]))
 
 
+class RulesTextTest(unittest.TestCase):
+    """What the rendered worker rules tell a worker about stopping processes."""
+
+    def render(self, **worker):
+        cfg = copy.deepcopy(cfgmod.DEFAULTS)
+        cfg.update(repo_root=None, project="p")
+        cfg["worker"].update(worker)
+        return spawn_worker.render_rules(cfg, "/x/test-lock.sh", "origin/main")
+
+    def test_kill_by_listening_pid_never_by_name(self):
+        for text in (self.render(), self.render(run_command="npm run dev")):
+            self.assertIn("## Processes and the shell", text)
+            self.assertIn("kill $(lsof -tiTCP:<port> -sTCP:LISTEN)", text)
+            self.assertIn("Never `pkill` or `killall`", text)
+            self.assertIn("Read tool", text)
+            self.assertNotIn("{{", text)
+
+    def test_run_rule_names_the_pid_form(self):
+        text = self.render(run_command="npm run dev")
+        rule = next(l for l in text.splitlines() if "npm run dev" in l)
+        self.assertNotIn("don't kill a process you didn't start", text)
+        self.assertIn("by its PID", rule)
+        self.assertIn("never pkill or killall", rule)
+
+
 if __name__ == "__main__":
     unittest.main()
