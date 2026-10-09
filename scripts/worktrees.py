@@ -10,6 +10,10 @@ always comes from git, never from Orca's cache, which lags behind the branch.
 Usage:
   worktrees.py inventory [--json] [--no-fetch]   # one line per worktree grouped by manager, the merge queue, then: agents waiting on the user, open PRs nobody handed over
   worktrees.py status <name>          # one word: in-review / blocked / handoff / other workspaceStatus; for Monitor loops
+  worktrees.py wait <name>... --until in-review|blocked|done|idle|exited|any [--timeout SEC] [--interval SEC]
+                                      # blocks until the workers get there, one line per change; exit 0 reached, 1 timeout, 2 missing
+  worktrees.py tail <name> [--lines N]   # the last N lines of the worker's terminal
+  worktrees.py tell <name> (--file PATH | --text TEXT) [--dry-run]   # send review notes; long ones go through briefs/<name>/feedback-<n>.md
   worktrees.py context [<name>]       # context estimate per worker session, flags the ones over worker.context_warn
   worktrees.py handoff <name>         # write briefs/<name>/handoff-digest.md from the worker's transcript and print it
   worktrees.py overlap <path...>      # open PRs / worktrees touching these paths, plus migration numbers already taken
@@ -33,6 +37,7 @@ for it or cleanup.auto is true; see references/manager.md, Cleanup.
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -257,15 +262,199 @@ def decide(r, idle_hours):
     return False, "no commits, but active recently"
 
 
+def is_named(w, name):
+    return os.path.basename(w.get("path", "")) == name or w.get("displayName") == name
+
+
+def status_word(w):
+    """The one word `status` prints for a worktree record; wait judges by the same word."""
+    up = (w.get("comment") or "").upper()
+    return "blocked" if up.startswith("BLOCKED") else "handoff" if up.startswith("HANDOFF") else (w.get("workspaceStatus") or "unknown")
+
+
 def cmd_status(name):
     _, repo_id = repo_context()
     for w in orca("worktree", "list", "--repo", f"id:{repo_id}").get("worktrees", []):
-        if os.path.basename(w.get("path", "")) == name or w.get("displayName") == name:
-            comment = w.get("comment") or ""
-            up = comment.upper()
-            print("blocked" if up.startswith("BLOCKED") else "handoff" if up.startswith("HANDOFF") else (w.get("workspaceStatus") or "unknown"))
+        if is_named(w, name):
+            print(status_word(w))
             return
     print("missing")
+
+
+WAIT_STATES = ("in-review", "blocked", "done", "idle", "exited", "any")
+
+
+def agent_word(agents):
+    """exited when Orca shows no agent pane in the worktree (terminal closed or the agent quit
+    to the shell), busy while any agent is working or at a permission prompt (the same
+    BUSY_STATES collect() uses), else idle."""
+    if not agents:
+        return "exited"
+    return "busy" if any(ag.get("state") in BUSY_STATES for ag in agents) else "idle"
+
+
+def reached(until, word, agent):
+    done = word in ("in-review", "blocked")
+    if until == "done":
+        return done
+    if until in ("idle", "exited"):
+        return agent == until
+    if until == "any":
+        # Whatever a manager would want to look at: finished, stuck, waiting, or gone.
+        return done or agent in ("idle", "exited")
+    return word == until
+
+
+def try_orca(*args):
+    """orca()'s result, or None instead of exiting: one failed poll must not end a wait that
+    may have run for an hour, and exit 1 is reserved for the timeout."""
+    code, out, _ = run([ORCA, *args, "--json"])
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return None
+    return (data.get("result") or {}) if not code and data.get("ok") else None
+
+
+def cmd_wait(names, until, timeout, interval):
+    """Why: managers hand-rolled this as `until orca terminal read … | grep …` loops and
+    sleeps the harness blocks. This is one process meant for Monitor or run_in_background;
+    its own time.sleep is invisible to the harness."""
+    _, repo_id = repo_context()
+    deadline = time.time() + timeout if timeout else None
+    last = {}
+    failed = False
+    while True:
+        wts = try_orca("worktree", "list", "--repo", f"id:{repo_id}")
+        ps = try_orca("worktree", "ps")
+        if wts is None or ps is None:
+            if not failed:
+                print("! orca call failed; retrying", flush=True)
+            failed = True
+        else:
+            failed = False
+            agents = {w.get("worktreeId"): w.get("agents") or [] for w in ps.get("worktrees", [])}
+            hit = []
+            for name in names:
+                w = next((w for w in wts.get("worktrees", []) if is_named(w, name)), None)
+                if w is None:
+                    print(f"{name}: missing", flush=True)
+                    sys.exit(2)
+                word, agent = status_word(w), agent_word(agents.get(w.get("id")))
+                if last.get(name) != (word, agent):
+                    last[name] = (word, agent)
+                    print(f"{name}: {word} ({agent})", flush=True)
+                hit.append(reached(until, word, agent))
+            if all(hit) or (until == "any" and any(hit)):
+                print(f"reached: {until}", flush=True)
+                return
+        if deadline is not None and time.time() >= deadline:
+            print(f"timeout after {timeout:g}s: not {until} yet", flush=True)
+            sys.exit(1)
+        time.sleep(interval if deadline is None else max(0, min(interval, deadline - time.time())))
+
+
+def find_worktree(name):
+    _, repo_id = repo_context()
+    return next((w for w in orca("worktree", "list", "--repo", f"id:{repo_id}").get("worktrees", [])
+                 if is_named(w, name)), None)
+
+
+def worker_terminal(w):
+    """The handle of the worker's agent terminal in worktree w, or None. spawn_worker.py
+    records only the manager's handle, so it's found here: the worktree's terminals, the one
+    holding Orca's agent pane first (a worktree may also have a plain shell open), newest
+    output among equals."""
+    data = try_orca("terminal", "list", "--limit", "1000")
+    ps = try_orca("worktree", "ps")
+    if data is None:
+        return None
+    mine = [t for t in data.get("terminals") or [] if t.get("handle") and
+            (t.get("worktreeId") == w.get("id") or
+             (t.get("worktreePath") and os.path.realpath(t["worktreePath"]) == os.path.realpath(w.get("path", ""))))]
+    panes = {ag.get("paneKey") for p in (ps or {}).get("worktrees", []) if p.get("worktreeId") == w.get("id")
+             for ag in p.get("agents") or []}
+    if not mine:
+        return None
+    best = max(mine, key=lambda t: (f"{t.get('tabId')}:{t.get('leafId')}" in panes, bool(t.get("agentIdentity")),
+                                    t.get("lastOutputAt") or 0))
+    return best["handle"]
+
+
+def resolve_worker(name):
+    """(worktree, handle) or exit: 2 when the worktree is gone (as wait does), 1 when it has
+    no terminal."""
+    w = find_worktree(name)
+    if w is None:
+        print(f"{name}: missing", flush=True)
+        sys.exit(2)
+    handle = worker_terminal(w)
+    if not handle:
+        die(f"no terminal found in worktree {name}", path=w.get("path"))
+    return w, handle
+
+
+def cmd_tail(name, lines):
+    _, handle = resolve_worker(name)
+    tail = terminal_tail(handle, lines)
+    if tail is None:
+        die(f"could not read terminal {handle}", worktree=name)
+    print(f"# {name} {handle}")
+    print(tail)
+
+
+# Longer than this, or more than one line, goes through a file: long sends get mangled or
+# refused, and a newline submits the text early.
+TELL_MAX = 300
+
+
+def next_feedback(brief_dir):
+    """briefs/<name>/feedback-<n>.md with n one past the highest there; 1 in a brief dir from
+    before feedback files existed."""
+    ns = []
+    for f in os.listdir(brief_dir) if os.path.isdir(brief_dir) else []:
+        m = re.fullmatch(r"feedback-(\d+)\.md", f)
+        if m:
+            ns.append(int(m.group(1)))
+    return os.path.join(brief_dir, f"feedback-{max(ns, default=0) + 1}.md")
+
+
+def cmd_tell(name, text, dry):
+    text = text.strip()
+    if not text:
+        die("nothing to send")
+    repo_root, _ = repo_context()
+    _, handle = resolve_worker(name)
+    path = None
+    if "\n" in text or len(text) > TELL_MAX:
+        path = next_feedback(os.path.join(cfgmod.common_dir(repo_root), "orca-flow", "briefs", name))
+        line = f"Manager feedback: read {path} and act on it."
+    else:
+        line = text
+    cmd = [ORCA, "terminal", "send", "--terminal", handle, "--text", line, "--enter", "--wait-submit", "15", "--json"]
+    if dry:
+        if path:
+            print(f"DRY-RUN would write {len(text)} chars to {path}")
+        print("DRY-RUN:", shlex.join(cmd))
+        return
+    if path:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+    code, out, err = run(cmd)
+    try:
+        data = json.loads(out)
+    except ValueError:
+        data = {}
+    if code or not data.get("ok"):
+        # Never re-sent: a send that reported failure may still have arrived, and a second
+        # copy makes the worker do the work twice.
+        print(json.dumps({"ok": False, "error": "orca terminal send failed; NOT re-sent",
+                          "next": f"read the terminal first (worktrees.py tail {name}) to see whether it arrived",
+                          "terminal": handle, "file": path, "response": data or (err or out)[-500:]},
+                         ensure_ascii=False, indent=1))
+        sys.exit(1)
+    print(f"sent to {name} ({handle}): {line}")
 
 
 def changed_paths(path):
@@ -453,7 +642,9 @@ def terminal_tail(handle, limit=200):
         return None
     if code or not data.get("ok"):
         return None
-    tail = (data.get("result") or {}).get("tail")
+    # Current Orca nests it under result.terminal; result.tail is kept for older hosts.
+    res = data.get("result") or {}
+    tail = (res.get("terminal") or {}).get("tail", res.get("tail"))
     if isinstance(tail, list):
         return "\n".join(str(l) for l in tail)
     return tail if isinstance(tail, str) else None
@@ -590,6 +781,27 @@ def cmd_context(rows, name):
               f"then spawn_worker.py --name <task> --continue.")
     else:
         print("handoff.enabled is false: flagged workers keep running and rely on the agent's own compaction.")
+    warn = window_warning([r["ctx"]["tokens"] for r in rows if r["ctx"] and (not name or r["name"] == name)])
+    if warn:
+        print(warn)
+
+
+# Context windows models are sold with; the likely real one is the smallest that fits.
+KNOWN_WINDOWS = (200000, 1000000)
+
+
+def window_warning(tokens, window=None):
+    """One line when a session holds more tokens than worker.context_window, else None. A
+    session can't exceed its real window, so the setting is too low and every '!' flag is
+    measured against the wrong number. Defaults are left alone; this only says so."""
+    window = CTX_WINDOW if window is None else window
+    top = max(tokens, default=0)
+    if top <= window:
+        return None
+    real = next((k for k in KNOWN_WINDOWS if k >= top), top)
+    return (f"! a session is at {top // 1000}k tokens, over worker.context_window ({window // 1000}k): the "
+            f"window is set lower than sessions actually use, likely {real}. Set worker.context_window to it "
+            f"and re-base worker.context_warn, or the '!' flag fires on every worker.")
 
 
 def cmd_handoff(name):
@@ -620,6 +832,21 @@ def main():
     inv.add_argument("--no-fetch", action="store_true")
     st = sub.add_parser("status")
     st.add_argument("name")
+    wt = sub.add_parser("wait")
+    wt.add_argument("names", nargs="+")
+    wt.add_argument("--until", required=True, choices=WAIT_STATES,
+                    help="done = in-review or blocked; any = one of them is done, idle or exited")
+    wt.add_argument("--timeout", type=float, default=0, help="seconds; 0 (default) waits forever")
+    wt.add_argument("--interval", type=float, default=30, help="seconds between polls (default 30)")
+    tl = sub.add_parser("tail")
+    tl.add_argument("name")
+    tl.add_argument("--lines", type=int, default=60)
+    te = sub.add_parser("tell")
+    te.add_argument("name")
+    src = te.add_mutually_exclusive_group(required=True)
+    src.add_argument("--file")
+    src.add_argument("--text")
+    te.add_argument("--dry-run", action="store_true")
     cx = sub.add_parser("context")
     cx.add_argument("name", nargs="?")
     cx.add_argument("--no-fetch", action="store_true")
@@ -640,6 +867,20 @@ def main():
 
     if a.cmd == "status":
         cmd_status(a.name)
+        return
+    if a.cmd == "wait":
+        cmd_wait(a.names, a.until, a.timeout, max(1.0, a.interval))
+        return
+    if a.cmd == "tail":
+        cmd_tail(a.name, a.lines)
+        return
+    if a.cmd == "tell":
+        text = a.text
+        if a.file:
+            text = read_file(a.file)
+            if text is None:
+                die(f"cannot read {a.file}")
+        cmd_tell(a.name, text, a.dry_run or os.environ.get("ORCA_FLOW_DRY_RUN") == "1")
         return
     if a.cmd == "overlap":
         cmd_overlap(a.paths, fetch=not a.no_fetch)

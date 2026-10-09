@@ -101,11 +101,16 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
      send the prompt by hand.
 5. **Tell the user** each worker's name, worktree path and terminal handle.
 6. **Watch the Orca card, not the terminal text.** Workers finish by setting their card to
-   `in-review` with the comment `PR #n:…`, or by commenting `BLOCKED:…`. To wait for one
-   worker, run a Monitor until-loop on:
+   `in-review` with the comment `PR #n:…`, or by commenting `BLOCKED:…`. To wait for workers,
+   run this as the Monitor command (or with `run_in_background`); it polls on its own and prints
+   one line per change:
    ```
-   python3 scripts/worktrees.py status <task-slug>     # prints in-review / blocked / in-progress / missing
+   python3 scripts/worktrees.py wait <task> [<task>…] --until done [--timeout 3600]
    ```
+   `--until` takes `in-review`, `blocked`, `done` (either of those), `idle` (the agent stopped
+   and waits), `exited` (no agent left in the worktree) or `any` (the first worker that is done,
+   idle or exited). Exit 0 reached, 1 timeout, 2 a worktree is gone. `worktrees.py status <task>`
+   prints the same state once.
    - **All workers:** `worktrees.py inventory`. Besides one line per worktree it lists agents
      waiting on the user and open PRs nobody has handed to the queue.
    - **Board:** `python3 scripts/board.py` shows every agent pane on this host, across all
@@ -114,8 +119,10 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
      question in prose, which Orca shows as `done`. `--watch` prints only changes; `--json`
      and `--write` give the rows to other tools. It only reads. Rules and row schema:
      `references/board.md`.
-   - **Details:** `orca terminal read --terminal <handle> --limit 60 --json`.
-   - **No polling with `sleep`:** a foreground `sleep` is blocked by the harness.
+   - **Details:** `python3 scripts/worktrees.py tail <task> [--lines 60]` prints the worker's
+     terminal; it finds the handle itself, no JSON to parse.
+   - **No polling by hand:** no `sleep` (the harness blocks it), no `orca terminal read` loops;
+     use `wait`.
    - **Context:** the `ctx` column (or `worktrees.py context`) shows each worker's estimated
      context use. When one is flagged `!` and `handoff.enabled` is true (the default), don't
      wait for it to finish on its own:
@@ -134,11 +141,14 @@ send` refuses in such a repo, and open PRs aren't reported as unhanded.
      With `handoff.bin` configured, send no wrap-up line (the working set is already current), but
      stop the old session before step 3: `orca terminal close --terminal <handle> --json`, and only
      then `--continue`, which refuses while Orca still shows an agent pane there (`--force` overrides).
-7. **Review each PR,** yourself or with a subagent. Send fixes as **one line**, because a
-   newline can submit the text early:
+7. **Review each PR,** yourself or with a subagent. Send the review with `tell`, never a raw
+   `orca terminal send`: long sends get mangled or refused, and a newline submits early.
    ```
-   orca terminal send --terminal <handle> --text "<review comments>" --enter --wait-submit 15 --json
+   python3 scripts/worktrees.py tell <task> --file <review.md>    # or --text "<one short line>"
    ```
+   Multi-line or over ~300 chars, it writes `briefs/<task>/feedback-<n>.md` and sends the
+   worker only `Manager feedback: read <path> and act on it.` If it reports a failed send it
+   did not retry: read the terminal (`tail`) before sending anything again.
 8. **Hand approved PRs to the queue** with `handover.py`, which writes a file the queue reads:
    ```
    python3 scripts/handover.py send <pr> --pending "<none | decisions>" --verified "<what the worker ran>" --after-deploy "<none | what to check>" --report-to <your session name> [--notify <queue terminal handle>]
