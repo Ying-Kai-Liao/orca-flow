@@ -12,6 +12,15 @@ need to know your commands simply say "not configured" instead of guessing.
 The local file (4) is also laid over whichever of 1-3 was found, key by key, so it can hold
 just the few values that are personal or secret while the rest stays in the committed file.
 
+**Lists the local file adds to.** For `worker.extra_rules`, `worker.checks`, `worker.big_files`,
+`worker.always_tests`, `main_checkout.allow_files`, `main_checkout.allow_prefixes`,
+`keep_worktrees`, `board.decision_phrases` and `board.negations`, a list in the local file is
+added to the repo file's list: repo items first, then local items, each item once. A local
+`[]` or `null` adds nothing; to drop a repo item, change the repo file. Every other list (e.g.
+`merge_queue.targets`) is still replaced whole by the local one, and `config.py check` warns
+when that hides a non-empty repo list. The defaults are not added to: a list in a config file
+replaces its default, as before.
+
 In a repo that has never used the skill, run `python3 scripts/init.py` (below). Otherwise
 start one with `python3 scripts/config.py init`.
 
@@ -34,8 +43,10 @@ config.py check                    # type-check the files; exit 1 on errors
   creates `<repo>/orca-flow.json`, never the local file, and prints which file changed.
 - **`--local`** writes `<git-common-dir>/orca-flow/config.json` instead. Use it for personal
   preferences (model, context limit, bypass) and for anything that mustn't be committed.
-  When a repo-file `set` is hidden by the local file, `set` says so.
-- **`--append`** adds one item to a list key: `set worker.checks "npm run lint" --append`.
+  When a repo-file `set` is hidden by (or, for the lists above, added to) the local file, `set` says so.
+- **`--append`** adds one item to a list key: `set worker.checks "npm run lint" --append`. It
+  edits only the file being written: with `--local`, the local list (which, for the lists
+  above, is then added to the repo's). Without `--append`, `--local` replaces the local list.
 - **`check`** also fails on a section that isn't an object (`"board": [1]`), which the
   scripts can't read.
 - **Unknown keys and wrong types are refused**, with a suggestion for a near miss, so a typo
@@ -78,6 +89,7 @@ overrides both.
 | `worker.migrations_dir` | none | Directory of numbered migrations. Enables clash detection in `worktrees.py overlap` and the queue's duplicate check. |
 | `worker.run_command` | none | How to start the app, for looking at a UI change before claiming it works. |
 | `worker.extra_rules` | `[]` | Extra bullets appended to the worker rules. Project-specific traps go here. |
+| `worker.always_tests` | `[]` | Cheap repo-wide invariant test files or globs (registries, catalogs, drift guards) every worker runs before opening its PR, through the test lock and `worker.test_command` (`{files}` = this list). Needs `worker.test_command`. Catches what would otherwise fail first in the queue's full check and come back. |
 | `worker.big_files` | `[]` | Files workers must never read whole; briefs give entry points with line ranges for them. |
 | `worker.big_file_lines` | `1500` | Above this many lines any file counts as big. |
 | `worker.context_window` | `200000` | Window the context estimate is measured against (`worktrees.py context`). Raise it for 1M-context models. |

@@ -208,6 +208,67 @@ class CheckTest(ConfigTestBase):
         self.assertTrue(line.startswith("*"))
 
 
+class LocalListsTest(ConfigTestBase):
+    def setUp(self):
+        super().setUp()
+        self.repo_file = os.path.join(self.root, "orca-flow.json")
+
+    def test_additive_lists_are_repo_plus_local(self):
+        self.write(self.repo_file, {"worker": {"extra_rules": ["never print secrets", "read the design docs"],
+                                               "checks": ["npm run lint"]},
+                                    "keep_worktrees": ["infra"]})
+        self.write(self.local, {"worker": {"extra_rules": ["mine", "read the design docs"], "checks": []},
+                                "keep_worktrees": None})
+        cfg = cfgmod.load()
+        self.assertEqual(cfg["worker"]["extra_rules"], ["never print secrets", "read the design docs", "mine"])
+        self.assertEqual(cfg["worker"]["checks"], ["npm run lint"])  # local [] adds nothing
+        self.assertIn("infra", cfg["keep_worktrees"])  # local null doesn't wipe the repo list
+        self.assertEqual(self.cli("get", "worker.extra_rules")[1].strip(),
+                         json.dumps(["never print secrets", "read the design docs", "mine"]))
+
+    def test_other_lists_still_replace_and_check_warns(self):
+        self.write(self.repo_file, {"merge_queue": {"targets": [{"name": "prod", "deploy": ["a"]}]}})
+        self.write(self.local, {"merge_queue": {"targets": [{"name": "staging", "deploy": ["b"]}]},
+                                "worker": {"extra_rules": ["mine"]}})
+        self.assertEqual([t["name"] for t in cfgmod.load()["merge_queue"]["targets"]], ["staging"])
+        code, out = self.cli("check")
+        self.assertEqual(code, 0)
+        self.assertIn(f"warning: merge_queue.targets: {self.local} replaces the list in {self.repo_file}", out)
+        self.assertNotIn("warning: worker.extra_rules", out)
+
+    def test_no_warning_over_an_empty_repo_list(self):
+        self.write(self.repo_file, {"merge_queue": {"targets": []}})
+        self.write(self.local, {"merge_queue": {"targets": [{"name": "staging", "deploy": ["b"]}]}})
+        self.assertNotIn("warning", self.cli("check")[1])
+
+    def test_repo_list_still_replaces_the_default(self):
+        self.write(self.repo_file, {"main_checkout": {"allow_prefixes": ["docs/"]}})
+        self.write(self.local, {"main_checkout": {"allow_prefixes": ["notes/"]}})
+        self.assertEqual(cfgmod.load()["main_checkout"]["allow_prefixes"], ["docs/", "notes/"])
+
+    def test_only_local_file(self):
+        self.write(self.local, {"worker": {"extra_rules": ["mine"]}})
+        self.assertEqual(cfgmod.load()["worker"]["extra_rules"], ["mine"])
+
+    def test_local_append_touches_only_the_local_list(self):
+        self.write(self.repo_file, {"worker": {"extra_rules": ["repo rule"]}})
+        self.cli("set", "worker.extra_rules", "mine", "--local", "--append")
+        self.cli("set", "worker.extra_rules", "mine too", "--local", "--append")
+        self.assertEqual(self.read(self.local), {"worker": {"extra_rules": ["mine", "mine too"]}})
+        self.assertEqual(self.read(self.repo_file), {"worker": {"extra_rules": ["repo rule"]}})
+        self.assertEqual(cfgmod.load()["worker"]["extra_rules"], ["repo rule", "mine", "mine too"])
+        # Without --append, --local replaces the local list only; the repo's items stay.
+        self.cli("set", "worker.extra_rules", '["other"]', "--local")
+        self.assertEqual(cfgmod.load()["worker"]["extra_rules"], ["repo rule", "other"])
+        self.assertIn("and its items are added", self.cli("set", "worker.extra_rules", '["r"]')[1])
+
+    def test_always_tests_key(self):
+        self.assertEqual(cfgmod.load()["worker"]["always_tests"], [])
+        self.assertEqual(self.cli("set", "worker.always_tests", "tests/test_registry.py", "--append")[0], 0)
+        self.assertEqual(cfgmod.load()["worker"]["always_tests"], ["tests/test_registry.py"])
+        self.assertIn("worker.always_tests", self.cli("keys")[1])
+
+
 class SettingsTest(ConfigTestBase):
     def test_context_warn_fraction_or_tokens(self):
         cfg = cfgmod.load()

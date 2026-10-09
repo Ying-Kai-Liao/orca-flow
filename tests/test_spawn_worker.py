@@ -6,6 +6,7 @@ Each test runs the script as a subprocess against a throwaway git repo ($ORCA_FL
 fake `orca` ($ORCA_CLI_COMMAND) that knows that repo and no worktrees, so nothing here touches
 the real Orca.
 """
+import copy
 import json
 import os
 import subprocess
@@ -14,6 +15,9 @@ import tempfile
 import unittest
 
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "spawn_worker.py")
+sys.path.insert(0, os.path.dirname(SCRIPT))
+import config as cfgmod  # noqa: E402
+import spawn_worker  # noqa: E402
 
 FAKE_ORCA = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -74,6 +78,23 @@ class SpawnWorkerAttachTest(unittest.TestCase):
 
     def test_no_attach(self):
         self.assertEqual(self.attached(self.dry_run()), [])
+
+
+class AlwaysTestsRuleTest(unittest.TestCase):
+    def rules(self, **worker):
+        cfg = copy.deepcopy(cfgmod.DEFAULTS)
+        cfg.update(repo_root=None, project="p")
+        cfg["worker"].update(worker)
+        return spawn_worker.render_rules(cfg, "/x/test-lock.sh", "origin/main")
+
+    def test_rendered_with_test_command(self):
+        out = self.rules(test_command="pytest {files}", always_tests=["tests/test_registry.py", "tests/test_catalog*.py"])
+        self.assertIn("also run these repo-wide checks", out)
+        self.assertIn("bash /x/test-lock.sh pytest tests/test_registry.py tests/test_catalog*.py", out)
+
+    def test_absent_when_empty_or_no_test_command(self):
+        self.assertNotIn("repo-wide checks", self.rules(test_command="pytest {files}"))
+        self.assertNotIn("repo-wide checks", self.rules(always_tests=["tests/test_registry.py"]))
 
 
 if __name__ == "__main__":
