@@ -17,19 +17,23 @@ with nothing to catch up on.
 
 Usage (manager):
   handover.py send <pr> [--pending "..."] [--verified "..."] [--after-deploy "..."] [--note "..."]
-                   [--report-to <session name>] [--notify <queue terminal handle>] [--dry-run] [--force]
+                   [--report-to <session name>] [--notify <terminal> | --no-notify] [--dry-run] [--force]
   handover.py status <pr>                   # what the queue has done with it (for Monitor loops: prints one word)
+  handover.py retarget <pr> --report-to <session>             # after a crash/resume renamed your session
+  handover.py retarget --all-from <old> --report-to <new>
 Usage (queue):
   handover.py list [--all]                  # pending handovers in arrival order; warns when a rotation is due
   handover.py take <pr>                     # mark it as being merged by this session
   handover.py done <pr> --sha <short sha> [--report "..."] [--no-deploy] [--no-count]
   handover.py back <pr> --reason "..."      # sent back without merging
-  handover.py queue start [--session <name>] | queue show | queue retire [--reason "..."]
+  handover.py queue start [--session <name>] [--terminal <handle>] | queue show | queue retire [--reason "..."]
+  handover.py prune [--older-than 14d] [--apply]   # dry run by default; archives finished handovers and old log lines
 """
 import argparse
 import datetime
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -113,10 +117,40 @@ def write_state(st):
     os.replace(tmp, state_path())
 
 
-def me(session=None):
+def me(session=None, terminal=None):
+    # ORCA_FLOW_SESSION is rarely set (90 of 114 real records had session: null), so the
+    # terminal handle is often the only identity there is; who() shows it in that case.
     return {"session": session or os.environ.get("ORCA_FLOW_SESSION") or None,
-            "terminal": os.environ.get("ORCA_TERMINAL_HANDLE") or None,
+            "terminal": terminal or os.environ.get("ORCA_TERMINAL_HANDLE") or None,
             "cwd": os.getcwd()}
+
+
+def who(ident):
+    """A person-readable name for a me() record: the session, else the terminal handle."""
+    ident = ident or {}
+    return ident.get("session") or ident.get("terminal") or "?"
+
+
+def terminal_exists(handle):
+    """True / False, or None when Orca can't be asked. Never raises: callers use it for
+    courtesies (notify, stale flags) that must not fail the command they're part of."""
+    def ask(*args):
+        try:
+            r = subprocess.run([ORCA, "terminal", *args, "--json"], capture_output=True, text=True, timeout=30)
+            return json.loads(r.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+    data = ask("list")
+    if not data or not data.get("ok"):
+        return None
+    res = data.get("result") or {}
+    if handle in {t.get("handle") for t in res.get("terminals") or [] if isinstance(t, dict)}:
+        return True
+    if not res.get("truncated"):
+        return False
+    # A truncated list proves nothing; ask for the one handle.
+    shown = ask("show", "--terminal", handle)
+    return bool(shown and shown.get("ok") and (shown.get("result") or {}).get("terminal", True))
 
 
 def gh_pr(pr):
@@ -142,6 +176,75 @@ def migration_files(files):
     return out
 
 
+def migration_number(path):
+    m = re.match(r"(\d+)", os.path.basename(path))
+    return int(m.group(1)) if m else None
+
+
+def migration_clashes(pr, migration):
+    """`! migration number ...` lines for the PR's new migrations whose number is already on the
+    base branch or in another pending/taken handover. A warning, not a refusal: #189 reused
+    063 from #186, and the only check ran at `worktrees.py overlap`, before the work existed."""
+    new = [m for m in migration if not m.endswith(" (modified)")]
+    if not new:
+        return []
+    d = (CFG["worker"].get("migrations_dir") or "").rstrip("/")
+    base = CFG.get("base_branch") or "origin/main"
+    used = {}  # number -> [where]
+    code, out, _ = run(["git", "ls-tree", "--name-only", base, d + "/"], cwd=CFG.get("repo_root"))
+    for f in out.splitlines() if code == 0 else []:
+        n = migration_number(f)
+        if n is not None:
+            used.setdefault(n, []).append(f"{base}:{f}")
+    for f in sorted(os.listdir(queue_dir())):
+        if not (f.endswith(".json") and f[:-5].isdigit()) or int(f[:-5]) == int(pr):
+            continue
+        try:
+            with open(os.path.join(queue_dir(), f), encoding="utf-8") as fh:
+                other = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if other.get("status") not in ("pending", "taken"):
+            continue
+        for m in other.get("migration") or []:
+            n = migration_number(m.replace(" (modified)", ""))
+            if n is not None:
+                used.setdefault(n, []).append(f"PR #{other['pr']} ({other['status']}) {m}")
+    out = []
+    for m in new:
+        n = migration_number(m)
+        if n is not None and used.get(n):
+            digits = re.match(r"\d+", os.path.basename(m)).group(0)
+            out.append(f"! migration number {digits} ({m}) also used by {'; '.join(used[n])}. "
+                       "Renumber it before the queue merges.")
+    return out
+
+
+def notify_target(a, st):
+    """(handle, warning): the terminal to notify, or None with the reason why not.
+    --notify wins; --no-notify turns it off; otherwise the active queue's terminal, but only
+    if Orca still has it. Managers passing a retired queue's handle by hand left the new
+    queue idle for 45 minutes (2026-10-08)."""
+    if a.no_notify:
+        return None, None
+    if a.notify:
+        return a.notify, None
+    act = st.get("active")
+    if not act:
+        return None, None  # the "no queue registered" warning below covers it
+    handle = act.get("terminal")
+    if not handle:
+        return None, (f"! the registered queue ({who(act)}) has no terminal handle, so it wasn't notified; "
+                      "it sees the file at its next `handover.py list`.")
+    exists = terminal_exists(handle)
+    if exists is False:
+        return None, (f"! the registered queue's terminal {handle} ({who(act)}) no longer exists in Orca, so nobody "
+                      "will pick this up. Start a queue: python3 scripts/spawn_queue.py --dry-run, then without it "
+                      "(it retires the gone one by itself).")
+    # exists None: Orca couldn't be asked. Try anyway; a failed send only prints a warning.
+    return handle, None
+
+
 def one_line(h):
     mig = ", ".join(h["migration"]) if h["migration"] else "none"
     return (f"[merge-queue] PR #{h['pr']} {h['branch']} head {h['head']} | migration: {mig} | "
@@ -156,7 +259,7 @@ def cmd_send(a):
     if not cfgmod.queue_enabled(CFG) and not a.force:
         method = CFG["merge_queue"].get("merge_method") or "squash"
         die("this repo has no merge queue (merge_queue.enabled is false); review and merge the PR yourself: "
-            f"gh pr merge {a.pr} --{method}. Pass --force to write the handover anyway.")
+            f"gh pr merge {a.pr} --{method} --delete-branch. Pass --force to write the handover anyway.")
     pr = gh_pr(a.pr)
     if pr["state"] != "OPEN":
         die(f"PR #{a.pr} is {pr['state']}, not OPEN")
@@ -177,20 +280,31 @@ def cmd_send(a):
             return
         h["history"].append({k: existing.get(k) for k in ("head", "status", "sent_at", "deployed", "reason")})
     line = one_line(h)
+    clashes = migration_clashes(a.pr, h["migration"])
     if a.dry_run or os.environ.get("ORCA_FLOW_DRY_RUN") == "1":
-        print(json.dumps({"ok": True, "dry_run": True, "would_write": path_for(a.pr), "handover": h, "line": line},
-                         ensure_ascii=False, indent=1))
+        print(json.dumps({"ok": True, "dry_run": True, "would_write": path_for(a.pr), "handover": h, "line": line,
+                          "warnings": clashes}, ensure_ascii=False, indent=1))
         return
     write(a.pr, h)
     print(line)
     print(f"(written to {path_for(a.pr)})")
-    if a.notify:
-        code, out, err = run([ORCA, "terminal", "send", "--terminal", a.notify, "--text", line, "--enter",
-                              "--wait-submit", "15", "--json"])
-        print("notified the queue terminal" if code == 0 else f"! notify failed: {err[-300:] or out[-300:]}")
+    for c in clashes:
+        print(c)
+    # The file is the record; everything below is a courtesy and must never fail the send.
     st = read_state()
+    handle, warning = notify_target(a, st)
+    if handle:
+        try:
+            code, out, err = run([ORCA, "terminal", "send", "--terminal", handle, "--text", line, "--enter",
+                                  "--wait-submit", "15", "--json"])
+        except OSError as e:
+            code, out, err = 1, "", str(e)
+        print(f"notified the queue terminal {handle}" if code == 0 else f"! notify failed: {err[-300:] or out[-300:]}")
+    if warning:
+        print(warning)
     if not st.get("active"):
-        print("! no queue session is registered (queue/state.json). Start one, or tell the user none is running.")
+        print("! no queue session is registered (queue/state.json). Start one: python3 scripts/spawn_queue.py "
+              "(--dry-run first), or tell the user none is running.")
 
 
 def cmd_status(a):
@@ -221,8 +335,9 @@ def cmd_list(a):
                 head_note = f"  ! PR is {live['state']}"
             elif live["headRefOid"] != h["head"]:
                 head_note = f"  ! head moved to {live['headRefOid'][:12]} (handed: {h['head'][:12]}); ask the manager"
+        by = f"  by {who(h.get('last_by'))}" if h["status"] == "taken" else ""
         print(f"{h['status']:<9} #{h['pr']:<5} {h['sent_at']}  {h['branch']}  head {h['head'][:12]}  "
-              f"migration: {', '.join(h['migration']) or 'none'}  pending: {h.get('pending') or 'none'}{head_note}")
+              f"migration: {', '.join(h['migration']) or 'none'}  pending: {h.get('pending') or 'none'}{by}{head_note}")
     if not shown:
         print("nothing pending.")
     st = read_state()
@@ -230,7 +345,7 @@ def cmd_list(a):
     if act:
         n = act.get("batches", 0)
         due = "  ROTATE: this queue has done its share; retire it and start a fresh one." if n >= ROTATE_AFTER else ""
-        print(f"\nqueue: {act.get('session') or act.get('terminal') or '?'} since {act['started_at']}, {n} batch(es) done{due}")
+        print(f"\nqueue: {who(act)} since {act['started_at']}, {n} batch(es) done{due}")
     else:
         print("\nqueue: none registered (handover.py queue start)")
 
@@ -268,9 +383,151 @@ def cmd_back(a):
     print(f"[merge-queue] PR #{h['pr']} sent back: {a.reason}")
 
 
+def cmd_retarget(a):
+    """Point pending/taken handovers at a manager's new session name. After the 10-06 Orca
+    crash every session was renamed and managers hand-edited queue/<pr>.json six times."""
+    if (a.pr is None) == (a.all_from is None):
+        die("give a PR number or --all-from <old session>, not both")
+    if a.pr is not None:
+        h = read(a.pr) or die(f"no handover for PR #{a.pr}")
+        if h["status"] not in ("pending", "taken"):
+            die(f"PR #{a.pr} is {h['status']}; only pending or taken handovers are retargeted")
+        targets = [h]
+    else:
+        targets = []
+        for f in sorted(os.listdir(queue_dir())):
+            if f.endswith(".json") and f[:-5].isdigit():
+                with open(os.path.join(queue_dir(), f), encoding="utf-8") as fh:
+                    h = json.load(fh)
+                if h["status"] in ("pending", "taken") and h.get("report_to") == a.all_from:
+                    targets.append(h)
+    for h in targets:
+        old = h.get("report_to")
+        if old == a.report_to:
+            print(f"#{h['pr']} already reports to {a.report_to}")
+            continue
+        # History keeps the old name, so the log can still say who was told what.
+        h.setdefault("history", []).append({"head": h["head"], "status": h["status"], "sent_at": h.get("sent_at"),
+                                            "report_to": old, "retargeted_at": now()})
+        h["report_to"] = a.report_to
+        h["last_by"] = me(a.report_to)
+        write(h["pr"], h)
+        print(f"#{h['pr']} report_to {old or 'none'} -> {a.report_to}")
+    if not targets:
+        print(f"no pending or taken handover reports to {a.all_from}.")
+
+
+def parse_age(text):
+    m = re.fullmatch(r"(\d+)\s*d?", text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"expected days like 14d, got {text!r}")
+    return int(m.group(1))
+
+
+def parse_at(text):
+    try:
+        return datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def cmd_prune(a):
+    """Archive finished handover files and old log lines. Dry run unless --apply. Pending and
+    taken handovers are never touched; neither is anything whose date can't be read."""
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=a.older_than)
+    d = queue_dir()
+    files, keep_notes = [], []
+    for f in sorted(os.listdir(d)):
+        if not (f.endswith(".json") and f[:-5].isdigit()):
+            continue
+        with open(os.path.join(d, f), encoding="utf-8") as fh:
+            h = json.load(fh)
+        status = h.get("status")
+        if status not in ("done", "returned"):
+            continue
+        at = parse_at(h.get("done_at") if status == "done" else h.get("returned_at")) or parse_at(h.get("sent_at"))
+        if not at or at >= cutoff:
+            continue
+        if status == "returned":
+            # A returned PR is still the manager's to re-send while it's open; only one that
+            # GitHub closed or merged (superseded by another PR, say) is finished.
+            # Needs a decision: whether old returned handovers of still-open PRs should go too.
+            try:
+                code, out, _ = run(["gh", "pr", "view", str(h["pr"]), "--json", "state"], cwd=CFG.get("repo_root"))
+                state = json.loads(out).get("state") if code == 0 else None
+            except (OSError, ValueError):
+                state = None
+            if state in (None, "OPEN"):
+                keep_notes.append(f"kept #{h['pr']}: returned, PR is {state or 'unknown on GitHub'}")
+                continue
+        files.append((f, h, at))
+    log_path = os.path.join(d, "log.jsonl")
+    old_lines, new_lines = [], []
+    if os.path.isfile(log_path):
+        with open(log_path, encoding="utf-8") as fh:
+            for raw in fh:
+                if not raw.strip():
+                    continue
+                try:
+                    at = parse_at(json.loads(raw).get("at"))
+                except (ValueError, AttributeError):
+                    at = None
+                (old_lines if at and at < cutoff else new_lines).append((raw if raw.endswith("\n") else raw + "\n", at))
+    for f, h, at in files:
+        print(f"{'archive' if a.apply else 'would archive'} #{h['pr']} {h['status']} {at:%Y-%m-%d}")
+    for n in keep_notes:
+        print(n)
+    print(f"{'archived' if a.apply else 'would archive'} {len(files)} handover file(s) and {len(old_lines)} log line(s) "
+          f"older than {a.older_than}d" + ("" if a.apply else "; run with --apply to do it"))
+    if not a.apply or (not files and not old_lines):
+        return
+    # Archive first, delete after: a crash in between leaves a duplicate, never a loss.
+    by_month = {}
+    for f, h, at in files:
+        by_month.setdefault(f"{at:%Y-%m}", []).append({"kind": "handover", "archived_at": now(), "file": f, "data": h})
+    for raw, at in old_lines:
+        by_month.setdefault(f"{at:%Y-%m}", []).append({"kind": "log", "archived_at": now(), "data": json.loads(raw)})
+    for month, rows in sorted(by_month.items()):
+        with open(os.path.join(d, f"archive-{month}.jsonl"), "a", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    for f, _, _ in files:
+        os.remove(os.path.join(d, f))
+    if old_lines:
+        tmp = f"{log_path}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.writelines(raw for raw, _ in new_lines)
+        os.replace(tmp, log_path)
+
+
+def registration_check(act):
+    """{"stale": bool, "why": [...]} for the registered queue: its terminal gone from Orca, or
+    its worktree removed. outer-convoy's state.json named a queue whose worktree was gone."""
+    why = []
+    handle = act.get("terminal")
+    exists = terminal_exists(handle) if handle else None
+    if handle and exists is False:
+        why.append(f"terminal {handle} no longer exists in Orca")
+    if act.get("cwd") and not os.path.isdir(act["cwd"]):
+        why.append(f"worktree {act['cwd']} no longer exists")
+    out = {"stale": bool(why), "why": why}
+    if not handle:
+        out["terminal"] = "unknown: the registration has no terminal handle"
+    elif exists is None:
+        out["terminal"] = "unknown: orca terminal list failed"
+    return out
+
+
 def cmd_queue(a):
     st = read_state()
     if a.action == "show":
+        act = st.get("active")
+        if act:
+            # Shown, not saved: the file stays what `queue start` wrote.
+            st = {**st, "active": {**act, "identity": who(act), **registration_check(act)}}
+            if st["active"]["stale"]:
+                st["hint"] = ("the registered queue is stale; python3 scripts/spawn_queue.py retires a gone one and "
+                              "starts a fresh queue")
         print(json.dumps(st, ensure_ascii=False, indent=1))
         return
     if a.action == "start":
@@ -279,7 +536,11 @@ def cmd_queue(a):
             if not a.force:
                 die("a queue is already registered; retire it first, or --force if it's really gone", active=act)
             st["retired"].append({**act, "retired_at": now(), "reason": "replaced with --force"})
-        st["active"] = {**me(a.session), "started_at": now(), "batches": 0}
+        # spawn_queue.py records the terminal it created, for a session started without
+        # $ORCA_TERMINAL_HANDLE; without a handle the queue can't be looked up in Orca.
+        spawned = st.pop("spawned", None) or {}
+        terminal = a.terminal or os.environ.get("ORCA_TERMINAL_HANDLE") or spawned.get("terminal")
+        st["active"] = {**me(a.session, terminal), "started_at": now(), "batches": 0}
         write_state(st)
         print(f"queue registered: {st['active']}")
         return
@@ -305,7 +566,9 @@ def main():
     s.add_argument("--after-deploy", help="what to check after deploy")
     s.add_argument("--note", help="one line for the status file")
     s.add_argument("--report-to", help="your session name, from ListAgents read just now")
-    s.add_argument("--notify", metavar="TERMINAL", help="also send the line to the queue's terminal handle")
+    s.add_argument("--notify", metavar="TERMINAL",
+                   help="send the line to this terminal; default: the registered queue's terminal, if Orca still has it")
+    s.add_argument("--no-notify", action="store_true", help="don't send the line to any terminal")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--force", action="store_true", help="write the handover even though merge_queue.enabled is false")
     st = sub.add_parser("status")
@@ -328,11 +591,19 @@ def main():
     q = sub.add_parser("queue")
     q.add_argument("action", choices=["start", "show", "retire"])
     q.add_argument("--session")
+    q.add_argument("--terminal", help="start: this queue's Orca terminal handle (default: $ORCA_TERMINAL_HANDLE)")
     q.add_argument("--reason")
     q.add_argument("--force", action="store_true")
+    r = sub.add_parser("retarget")
+    r.add_argument("pr", type=int, nargs="?")
+    r.add_argument("--all-from", metavar="OLD_SESSION", help="every pending/taken handover reporting to this session")
+    r.add_argument("--report-to", required=True, help="your session name now, from ListAgents read just now")
+    pr_ = sub.add_parser("prune")
+    pr_.add_argument("--older-than", type=parse_age, default=14, metavar="DAYS", help="e.g. 14d (default)")
+    pr_.add_argument("--apply", action="store_true", help="archive and delete; without it, only list")
     a = p.parse_args()
     {"send": cmd_send, "status": cmd_status, "list": cmd_list, "take": cmd_take, "done": cmd_done,
-     "back": cmd_back, "queue": cmd_queue}[a.cmd](a)
+     "back": cmd_back, "queue": cmd_queue, "retarget": cmd_retarget, "prune": cmd_prune}[a.cmd](a)
 
 
 if __name__ == "__main__":

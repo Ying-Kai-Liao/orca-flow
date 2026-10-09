@@ -37,6 +37,11 @@ if cmd == ["repo", "list"]:
     ok({"repos": [{"id": "repo1", "path": os.environ["FAKE_ORCA_REPO"]}]})
 elif cmd == ["worktree", "list"]:
     ok({"worktrees": state.get("worktrees", [])})
+elif cmd == ["worktree", "ps"]:
+    if state.get("ps_fails"):
+        print(json.dumps({"ok": False, "error": {"code": "runtime_unavailable"}}))
+    else:
+        ok({"worktrees": state.get("ps", [])})
 elif cmd == ["worktree", "create"]:
     wt = {"id": "wt_new", "path": state["new_worktree_path"], "displayName": args[args.index("--name") + 1]}
     state.setdefault("worktrees", []).append(wt)
@@ -108,8 +113,15 @@ class SpawnQueueTest(unittest.TestCase):
         with open(self.state) as f:
             return json.load(f)
 
-    def term(self, handle, orphaned=False, worktree="wt_q", agent="claude"):
-        return {"handle": handle, "orphaned": orphaned, "worktreeId": worktree, "agentIdentity": agent, "title": "q"}
+    def term(self, handle, orphaned=False, worktree="wt_q", agent="claude", tab=None, leaf=None):
+        t = {"handle": handle, "orphaned": orphaned, "worktreeId": worktree, "agentIdentity": agent, "title": "q"}
+        if tab:
+            t.update(tabId=tab, leafId=leaf)
+        return t
+
+    def ps(self, *agents):
+        """`orca worktree ps` for the queue worktree: (paneKey, state) pairs."""
+        return [{"worktreeId": "wt_q", "agents": [{"paneKey": k, "state": s} for k, s in agents]}]
 
     def register(self, terminal="term_old", session="queue-old"):
         os.makedirs(self.queue_dir, exist_ok=True)
@@ -318,6 +330,53 @@ class SpawnQueueTest(unittest.TestCase):
         self.assertNotIn("other_agents", res["queue"])
         self.assertEqual(self.calls("terminal", "close"), [])
         self.assertEqual(len(self.calls("terminal", "send")), 1)
+
+    def retire_leftover(self, handle="term_left"):
+        """state.json after a rotation: the old queue retired, nothing active."""
+        os.makedirs(self.queue_dir, exist_ok=True)
+        with open(os.path.join(self.queue_dir, "state.json"), "w") as f:
+            json.dump({"active": None, "retired": [{"session": "queue-old", "terminal": handle,
+                                                     "retired_at": "2026-10-08T00:00:00Z", "reason": "rotation"}]}, f)
+
+    def test_idle_retired_leftover_is_closed_without_replace(self):
+        self.retire_leftover()
+        self.set_orca(terminals=[self.term("term_left", tab="t1", leaf="l1")], ps=self.ps(("t1:l1", "idle")))
+        code, res = self.run_json("--dry-run")
+        self.assertEqual(code, 0, res)
+        self.assertEqual(res["close"], ["term_left"])
+        self.assertEqual([t["handle"] for t in res["queue"]["leftovers"]], ["term_left"])
+        self.assertNotIn("other_agents", res["queue"])
+        self.assertEqual(self.calls("terminal", "close"), [])
+        code, res = self.run_json()
+        self.assertEqual(code, 0, res)
+        self.assertEqual(self.calls("terminal", "close"), [["terminal", "close", "--terminal", "term_left", "--json"]])
+        self.assertEqual(len(self.calls("terminal", "create")), 1)
+
+    def test_leftover_that_is_busy_hidden_or_unknown_still_blocks(self):
+        self.retire_leftover()
+        for terminals, ps, extra in (
+                ([self.term("term_left", tab="t1", leaf="l1")], self.ps(("t1:l1", "working")), {}),
+                ([self.term("term_left", tab="t1", leaf="l1", orphaned=True)], self.ps(("t1:l1", "idle")), {}),
+                ([self.term("term_left")], self.ps(("t1:l1", "idle")), {}),          # no pane to match
+                ([self.term("term_left", tab="t1", leaf="l1")], [], {"ps_fails": True})):
+            self.set_orca(terminals=terminals, ps=ps, **extra)
+            code, res = self.run_json()
+            self.assertEqual(code, 1, (terminals, ps, extra))
+            self.assertIn("--replace", res["error"])
+            self.assertNotIn("leftovers", res["queue"])
+        self.assertEqual(self.calls("terminal", "close"), [])
+
+    def test_unretired_idle_agent_still_blocks(self):
+        # Idle but never registered as retired: maybe a queue that hasn't run `queue start`.
+        self.set_orca(terminals=[self.term("term_x", tab="t1", leaf="l1")], ps=self.ps(("t1:l1", "idle")))
+        code, res = self.run_json()
+        self.assertEqual(code, 1)
+        self.assertEqual([t["handle"] for t in res["queue"]["other_agents"]], ["term_x"])
+
+    def test_start_records_the_new_terminal_for_queue_start(self):
+        code, res = self.run_json()
+        self.assertEqual(code, 0, res)
+        self.assertEqual(self.queue_state()["spawned"]["terminal"], "term_new")
 
     def test_worktree_created_when_missing(self):
         self.set_orca(worktrees=[])
