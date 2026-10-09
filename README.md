@@ -42,6 +42,9 @@ examples/                     ready-made configs
 evals/                        eval suite for the skill
 ```
 
+No Orca? [`mod/flow-board`](mod/flow-board) runs the same flow inside one Claude Code session:
+workers are background subagents in worktrees of their own, watched from a Flow pane.
+
 ## Requirements
 
 - the Orca app and its `orca` CLI, with your repo added

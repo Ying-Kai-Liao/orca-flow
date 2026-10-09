@@ -1,0 +1,6 @@
+{
+  "name": "flow-board",
+  "version": "0.1.0",
+  "description": "orca-flow without Orca: workers as in-session subagents in their own worktrees, watched and switched from a pane in main",
+  "types": "./types/index.d.ts"
+}
