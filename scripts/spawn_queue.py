@@ -20,10 +20,15 @@ One queue at a time. The registered queue (handover.py queue show) is looked up 
   scrollback is lost, so ask the user first), retires it, then starts the new one.
 - gone: retired ("terminal gone") and replaced, no --replace needed.
 Any other agent terminal in the queue worktree counts as an unregistered queue (one that
-hasn't run `queue start` yet, say) and is treated like a hidden one.
+hasn't run `queue start` yet, say) and is treated like a hidden one, with one exception: a
+terminal state.json lists as already retired, with a pane whose agent Orca reports idle or
+done, is a rotation leftover. It is closed without --replace, and the output says so under
+"leftovers": a retired queue has stopped taking handovers, so nothing is lost but scrollback
+of a finished session, and these piled up until the user asked for cleanup ~19 times.
 
 The prompt is one line, sent once after the TUI reports idle (spawn_worker.start_agent).
-The new session registers itself with `handover.py queue start`.
+The new session registers itself with `handover.py queue start`, which picks up the terminal
+handle this script records in state.json ("spawned") when the session's environment has none.
 
 It waits for the TUI (up to ~6 minutes), so call it with a Bash timeout of 600000.
 """
@@ -78,6 +83,50 @@ def classify(active, terminals, complete):
     return state, why
 
 
+# Agent states that mean nobody is mid-turn in that pane. Not None/"": an agent Orca can't
+# describe is not proven idle.
+LEFTOVER_STATES = ("idle", "done")
+
+
+def pane_states(wt_id):
+    """{paneKey: agent state} for the worktree from `orca worktree ps`, or None if Orca can't
+    say. Not spawn_worker.orca(): that exits on failure, and a failed lookup here must only
+    mean "no leftovers proven"."""
+    try:
+        r = subprocess.run([spawn_worker.ORCA, "worktree", "ps", "--json"], capture_output=True, text=True)
+        data = json.loads(r.stdout)
+    except (OSError, ValueError):
+        return None
+    if not data.get("ok"):
+        return None
+    w = next((w for w in (data.get("result") or {}).get("worktrees") or [] if w.get("worktreeId") == wt_id), None)
+    return {ag.get("paneKey"): ag.get("state") for ag in (w or {}).get("agents") or [] if ag.get("paneKey")}
+
+
+def leftovers(others, retired, wt_id):
+    """The terminals among others that are rotation leftovers: retired in state.json, not
+    orphaned, and their pane's agent idle or done."""
+    retired_handles = {r.get("terminal") for r in retired or [] if r.get("terminal")}
+    cands = [t for t in others if t.get("handle") in retired_handles and not t.get("orphaned")]
+    if not cands:
+        return []
+    panes = pane_states(wt_id)
+    if panes is None:
+        return []
+    return [t for t in cands if t.get("tabId") and t.get("leafId")
+            and panes.get(f"{t['tabId']}:{t['leafId']}") in LEFTOVER_STATES]
+
+
+def record_spawned(handle):
+    """Tell the coming `handover.py queue start` which terminal it runs in."""
+    try:
+        st = handover.read_state()
+        st["spawned"] = {"terminal": handle, "at": handover.now()}
+        handover.write_state(st)
+    except (OSError, ValueError):
+        pass  # the queue then registers without a handle, as before; nothing else depends on it
+
+
 def main():
     p = argparse.ArgumentParser(description="Start the merge queue in a visible Orca terminal")
     p.add_argument("--model", help="agent model; defaults to merge_queue.model in the config")
@@ -126,7 +175,8 @@ def main():
     if not common_dir:
         die(f"no git common dir for {repo_root}")
     # With the common dir, read_state creates nothing: --dry-run must write nothing.
-    active = handover.read_state(common_dir).get("active")
+    qstate = handover.read_state(common_dir)
+    active = qstate.get("active")
     state, why = classify(active, terminals, complete) if active else ("none", None)
     handle = (active or {}).get("terminal")
     # On rotation the caller is the retiring queue, in this same worktree; it stops once its
@@ -136,6 +186,8 @@ def main():
     # run `queue start` yet, or one resumed by hand. Two queues must never run at once.
     others = [t for t in terminals if wt and t.get("worktreeId") == wt.get("id")
               and t.get("handle") not in (handle, own) and t.get("agentIdentity")]
+    left = leftovers(others, qstate.get("retired"), wt.get("id")) if others else []
+    others = [t for t in others if t not in left]
 
     queue = {"registered": active, "state": state}
     if why:
@@ -143,6 +195,9 @@ def main():
     if others:
         queue["other_agents"] = [{"handle": t.get("handle"), "title": t.get("title"), "orphaned": bool(t.get("orphaned"))}
                                  for t in others]
+    if left:
+        queue["leftovers"] = [{"handle": t.get("handle"), "title": t.get("title"),
+                               "why": "already retired in queue/state.json and its agent is idle: closed"} for t in left]
 
     if state == "live" and handle == own:
         die("you are the registered queue; run handover.py queue retire first, then spawn_queue.py", queue=queue)
@@ -160,7 +215,7 @@ def main():
             "run again with --replace (it closes those terminals; their scrollback is lost).", queue=queue)
 
     # What will be closed and retired, in order.
-    close = [t.get("handle") for t in others]
+    close = [t.get("handle") for t in others + left]
     if state == "hidden" or (state == "unknown" and handle):
         close.insert(0, handle)
     retire = {"gone": "terminal gone", "hidden": "replaced by spawn_queue",
@@ -233,7 +288,7 @@ def main():
                 **base_info)
         base_info["retired"] = r.stdout.strip()
 
-    start_agent(wt["id"], agent_cmd, prompt, base_info, title=TITLE, role="queue")
+    start_agent(wt["id"], agent_cmd, prompt, base_info, title=TITLE, role="queue", on_created=record_spawned)
 
 
 if __name__ == "__main__":

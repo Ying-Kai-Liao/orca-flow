@@ -197,8 +197,17 @@ shell; that is how it lost its pane.
 ## Handing a PR over
 
 ```
-python3 scripts/handover.py send <pr> --pending "<none | decisions the user still has to make>" --verified "<what the worker ran, and that the full suite was not>" --after-deploy "<none | what to check>" --note "<one line for the status file>" --report-to <your session name, from ListAgents read just now> [--notify <queue terminal handle>]
+python3 scripts/handover.py send <pr> --pending "<none | decisions the user still has to make>" --verified "<what the worker ran, and that the full suite was not>" --after-deploy "<none | what to check>" --note "<one line for the status file>" --report-to <your session name, from ListAgents read just now>
 ```
+- **Notifying the queue is automatic:** `send` sends the line to the registered queue's terminal
+  (from `queue/state.json`), so don't pass `--notify` with a handle from memory; an old one
+  reaches a retired queue while the new one sits idle. If the registered terminal is gone, it
+  says so: start a queue (`spawn_queue.py`) instead. `--no-notify` skips it. Notifying is a
+  courtesy and never fails the send; the file is the record. Running `send` again with the same
+  head does nothing and notifies nobody.
+- **Migration numbers:** `send` warns `! migration number NNN also used by …` when a new
+  migration's number is already on the base branch or in another pending handover. Have the
+  worker renumber and push, then `send` again.
 - The script copies the **head** from `gh pr view`, so the queue merges the commit that exists,
   not one typed from memory. Review at that head: `gh pr view <n> --json headRefOid` and read the
   diff at that commit, not the one you looked at two pushes ago.
@@ -208,6 +217,10 @@ python3 scripts/handover.py send <pr> --pending "<none | decisions the user stil
   push again, run `send` again; the file records the new head and keeps the old one in history.
 - **Waiting for the result:** `handover.py status <pr>` prints `pending`, `taken`, `done <sha>`,
   `returned — <reason>` or `unhanded`. A Monitor until-loop can wait on it.
+- **After a resume or an Orca crash renamed your session,** point your handovers at the new
+  name instead of editing the files: `handover.py retarget <pr> --report-to <new name>`, or
+  `handover.py retarget --all-from <old name> --report-to <new name>`. The old name stays in the
+  file's history.
 - **If no queue is running:** start one without asking ("Finding the running queue" above,
   `references/merge-queue.md`, "Starting a queue"), then tell the user you did.
 

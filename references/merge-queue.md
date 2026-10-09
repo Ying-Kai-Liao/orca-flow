@@ -62,7 +62,12 @@ A manager starts it without asking the user whenever it has an approved PR and n
   itself (default: `worker.bypass_permissions`). The queue runs deploy commands, and a
   permission prompt nobody sees will stall it.
 - **The queue's first command** is `python3 scripts/handover.py queue start --session <its name from ListAgents>`
-  (the prompt says so). Until then managers see no registered queue.
+  (the prompt says so). Until then managers see no registered queue. It records the terminal
+  handle too (`spawn_queue.py` leaves it in state.json for the new session), so managers'
+  `send` can notify it and `queue show` can tell when it is `stale` (terminal or worktree gone).
+- **Rotation leftovers:** a terminal in the queue worktree that state.json lists as retired,
+  whose agent Orca reports idle or done, is closed without `--replace` and listed under
+  `queue.leftovers`.
 - **Never continue a queue with `claude --resume` / `--continue` in a shell, or start one
   anywhere outside `spawn_queue.py`.** That is how a queue ends up running with no pane, merging
   where nobody can see it. A queue is always a fresh session; its state is the handover files.
@@ -78,6 +83,17 @@ python3 scripts/handover.py list --check      # pending handovers in arrival ord
 Take each PR you're about to merge (`handover.py take <pr>`), so a second queue session or a
 manager can see it's in progress. When `list` says ROTATE, finish the batch, then see "Rotating
 the queue".
+
+**Never hold the queue for one PR.** A PR that waits on a user decision, or fails on its own,
+is set aside — `handover.py back <pr> --reason "..."`, or left `taken` with the reason in your
+report — and the rest of the batch merges, checks and deploys without it. (On 2026-09-27 one PR
+waiting for a confirmation held another behind it for nearly five hours.) The batch stops only
+for what stops everything: a broken full check, a logic conflict, a failed backup or health check.
+
+**Between batches, wait on the files, not on messages.** Managers notify you as a courtesy,
+and a notify can reach a retired queue instead of you. Arm a Monitor until-loop on
+`python3 scripts/handover.py list` (or on the `queue/` directory) that ends when a `pending`
+line appears, and start the next batch from that.
 
 ### 1. Start clean
 
@@ -119,7 +135,10 @@ ls <migrations dir> | grep -oE '^[0-9]+' | sort | uniq -d | diff /tmp/dup-before
 bash <skill-dir>/scripts/test-lock.sh <worker.full_check_command>      # run_in_background; takes minutes
 ```
 - **A failure caused by combining PRs** (one PR's test doesn't know about another PR's new
-  field): fix it in a follow-up commit, then run the check again.
+  field, two PRs each fine alone): the queue may fix it itself, in one small commit on top of the
+  merges (`Fix combination of #<a> and #<b>: <what>`), then run the check again. Note it in the
+  status file entry and in both PRs' reports, so the managers know their code was touched. Anything
+  bigger than a small, mechanical fix is a logic conflict: send the later PR back instead.
 - **A real bug in one PR:** take that PR out, then run the check again:
   ```
   git log --first-parent --oneline <base branch>..HEAD      # find "Merge PR #<bad>"
@@ -137,6 +156,10 @@ bash <skill-dir>/scripts/test-lock.sh <worker.full_check_command>      # run_in_
 now on the base branch.
 - **Why not `gh pr merge`:** it creates a different merge commit from the one you just verified.
 - **If the push is rejected:** fetch, merge the base branch, run the check again, push again.
+- **Delete the merged branches:** once GitHub shows each PR `MERGED`,
+  `git push origin --delete <branch>` for each (what `gh pr merge --delete-branch` would do; if
+  you ever do merge with `gh pr merge`, always pass `--delete-branch`). Merged branches nobody
+  deletes pile up by the hundred.
 
 ### 5. Deploy
 
@@ -185,6 +208,11 @@ When `handover.py list` says ROTATE and the current batch is deployed:
 3. Set the card: `orca worktree set --worktree active --comment "queue rotated; new queue in <handle>" --json`
 4. Tell the user (or the manager who is around) the new terminal handle in one line, and stop
    taking handovers.
+5. **From then on, whoever messages you gets the same answer:** "This queue retired; the queue
+   is now <successor's session or handle> (`handover.py queue show`). Your handover file is
+   already in the queue directory, nothing to resend." Don't merge, take or answer for the
+   successor. Managers' `send` notifies the registered queue on its own now, but one with an old
+   handle typed by hand will still reach you.
 
 Nothing is lost: pending handovers are files, the deployed state is in the status file, and
 the retired session never has to be consulted. Don't hand a PR to a retired session, and don't
