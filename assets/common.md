@@ -32,6 +32,17 @@ described in the last section.
 {{FULL_CHECK_RULE}}{{CHECKS_RULE}}{{TEST_RULE}}- The Setup terminal may still be installing dependencies. Check that they're installed before
   running anything.
 {{RUN_RULE}}
+## Processes and the shell
+
+- Stop only processes you started, by PID: `kill <pid>`, or for a server on a port
+  `kill $(lsof -tiTCP:<port> -sTCP:LISTEN)`. Never `pkill` or `killall`: other worktrees run the
+  same command lines, and a bad pattern has killed Orca and every session with it. Without
+  `-sTCP:LISTEN`, lsof also lists Orca's built-in browser, which is connected to your server.
+- The shell is zsh on macOS. Read files with the Read tool, not `cat a; echo ===; cat b` (in zsh a
+  word starting with `=` is a command lookup, and the whole line fails). There is no `timeout`
+  command: use `run_in_background` or the Bash tool's timeout. An unquoted `$VAR` is not split
+  into words: `A="--x a --x b"; cmd $A` passes one argument.
+
 ## Finishing
 
 1. Commit. A one-line message in {{LANGUAGE}} saying what changed and why; add whatever

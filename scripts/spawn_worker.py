@@ -185,8 +185,9 @@ def render_rules(cfg, test_lock, base):
     run_rule = ""
     if w.get("run_command"):
         run_rule = (f"- For a UI change, start the app (`{w['run_command']}`) and look at it in Orca's "
-                    f"browser before writing that you verified it. If the port is taken, use another one; "
-                    f"don't kill a process you didn't start.\n")
+                    f"browser before writing that you verified it. If the port is taken, use another one. "
+                    f"Stop only a server you started, by its PID: `kill $(lsof -tiTCP:<port> -sTCP:LISTEN)`; "
+                    f"never pkill or killall.\n")
 
     out = (text
            .replace("{{PROJECT}}", cfg.get("project") or "this project")
@@ -612,7 +613,8 @@ def continue_worker(a, cfg, wt, brief_dir, brief_path, common_path, test_lock, a
         f"You are continuing the \"{a.name}\" package after the previous worker session ended. First read "
         + ws["read_first"] + f"{common_path} (the rules), then {brief_path} (the package)"
         + (", then " + " and ".join(reads) if reads else "")
-        + ". Check the worktree's git state yourself before trusting any of it. Don't redo finished work. "
+        + ", each with the Read tool. Check the worktree's git state yourself before trusting any of it. "
+        + "Don't redo finished work. "
         + (f"From the manager: {a.note} " if a.note else "")
         + "Then carry on to completion and report as the rules' last sections describe."
     )
@@ -733,9 +735,11 @@ def main():
     # One line: multi-line text sent to a TUI can submit at the first newline.
     # Deliberately no "done" marker wording here: the prompt stays on screen, and a manager
     # grepping the terminal for that marker would read it as the worker having finished.
+    # "with the Read tool": told only "read", agents chain `cat a; echo ======; cat b`, and zsh
+    # treats a word starting with = as a command lookup, so the very first step fails.
     prompt = (
-        f"You are the worker for the \"{a.name}\" package. First read {common_path} (the rules for "
-        f"every worker here), then {brief_path} (what this package is; screenshots are in the same "
+        f"You are the worker for the \"{a.name}\" package. First open {common_path} with the Read "
+        f"tool (the rules for every worker here), then {brief_path} (what this package is; screenshots are in the same "
         f"folder), then do it. Work straight through without checking back with me; handle product "
         f"calls the way the rules say. Finish by reporting as the last two sections describe."
     )

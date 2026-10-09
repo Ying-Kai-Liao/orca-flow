@@ -37,6 +37,7 @@ scripts/transcript.py         read a session's transcript: context estimate, han
 scripts/archive_status.py     move old status-file entries into an archive
 scripts/test-lock.sh          flock-based queue so N test runs share the machine
 scripts/main_checkout_guard.py PreToolUse hook keeping the main checkout on its base branch
+scripts/process_guard.py      PreToolUse hook blocking pkill/killall and kills that reach other sessions or Orca
 scripts/config.py             config: show · get · keys · set · unset · check · init
 examples/                     ready-made configs
 evals/                        eval suite for the skill
@@ -102,6 +103,33 @@ It allows `.claude/` and your status file by default, and anything you add to
 `main_checkout.guard` to `false`. The user's own escape hatch is
 `touch <repo>/.git/orca-flow/allow-main-edits` — which the hook refuses to let an agent create,
 because a refusal message that explains how to bypass itself isn't a refusal.
+
+### The process guard (optional, recommended)
+
+A PreToolUse hook for Bash that blocks kills which reach past the agent's own processes:
+`pkill` and `killall` in any form, `lsof … | xargs kill` and `kill $(lsof …)` without
+`-sTCP:LISTEN` (that also lists Orca's built-in browser as a client of the port), and kill of PID
+-1, 0 or 1. `kill <pid>` and `kill $(lsof -tiTCP:<port> -sTCP:LISTEN)` go through. Add it next to
+the main-checkout guard in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 /absolute/path/to/orca-flow/scripts/process_guard.py" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+It reads only words in command position, so `grep pkill file` or `echo "pkill"` aren't blocked;
+the flip side is that a kill hidden well enough (a variable holding the PIDs, a script file) gets
+through.
 
 ## Using it
 

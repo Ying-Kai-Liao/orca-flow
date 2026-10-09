@@ -115,5 +115,9 @@ timeout.
   when it has no local commits. Otherwise leave it and tell the user.
 - **Orca flags:** if a flag is unclear, run `orca <command> --help` or `orca skills get orca-cli`.
   Don't guess. Check `ok` in every `--json` response before reading `result`.
+- **Killing processes:** managers and the queue run dev servers and deploy watchers too, next to
+  every worker's. Stop only what you started, by PID (`kill $(lsof -tiTCP:<port> -sTCP:LISTEN)`);
+  never pkill/killall, which have taken down Orca and every session. `scripts/process_guard.py`
+  is a Bash hook that enforces it (README).
 - **Prompts to a TUI:** one line, sent once, only after it's idle; never re-send after a failed
   send — the prompt may have landed. Read the terminal instead.
